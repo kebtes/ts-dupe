@@ -1,20 +1,116 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
 import { AccordionItem, AccordionGroup } from '../ui/Accordion';
+import { Sparkles, RefreshCw } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, TrainingProfileDraftData } from '../../api/tabs';
+import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface TrainingProfileTabProps {
   data: TrainingData;
+  onUpdateData?: (updated: any) => void;
 }
 
-export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) => {
-  const { trainingProfile, objectives } = data as any;
+export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, onUpdateData }) => {
+  const { trainingProfile, objectives, training } = data as any;
+  const trainingId = training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  const [currentScope, setCurrentScope] = useState<string>(
+    trainingProfile?.scope ||
+      'The AI/ML Residency Program is a two-month, project-based training program designed to provide participants with practical experience in the end-to-end development, deployment, and optimization of machine learning models and AI systems.'
+  );
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiDraft, setAiDraft] = useState<TabDraftResponse<TrainingProfileDraftData> | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Check for cached draft on mount
+  useEffect(() => {
+    getCachedDraft<TrainingProfileDraftData>('training-profile', trainingId).then((draft) => {
+      if (draft && draft.data?.scope) {
+        setAiDraft(draft);
+      }
+    });
+  }, [trainingId]);
+
+  const handleGenerate = async () => {
+    setIsGenerating(true);
+    setErrorMessage(null);
+    try {
+      const response = await generateTabDraft<TrainingProfileDraftData>('training-profile', trainingId);
+      setAiDraft(response);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleApplyDraft = () => {
+    if (aiDraft?.data?.scope) {
+      setCurrentScope(aiDraft.data.scope);
+      if (onUpdateData) {
+        onUpdateData({
+          ...data,
+          trainingProfile: {
+            ...trainingProfile,
+            scope: aiDraft.data.scope,
+          },
+        });
+      }
+      setAiDraft(null);
+    }
+  };
 
   return (
     <div className="px-[7%] py-10 mb-10">
-      <h1 className="text-md md:text-xl text-black mb-4 font-semibold">Training Profile</h1>
-      <h2 className="text-md md:text-lg text-gray-500 font-normal mb-6">
-        The Training Profile section is designed to provide a comprehensive overview of a training program.
-      </h2>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+        <div>
+          <h1 className="text-md md:text-xl text-black mb-1 font-semibold">Training Profile</h1>
+          <h2 className="text-md md:text-lg text-gray-500 font-normal">
+            The Training Profile section is designed to provide a comprehensive overview of a training program.
+          </h2>
+        </div>
+
+        {/* AI Generator Button */}
+        <button
+          onClick={handleGenerate}
+          disabled={isGenerating}
+          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50 self-start md:self-auto"
+        >
+          {isGenerating ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : (
+            <Sparkles className="w-4 h-4 text-cyan-200" />
+          )}
+          <span>{isGenerating ? 'Generating Scope...' : 'Suggest with AI'}</span>
+        </button>
+      </div>
+
+      {/* Error banner if precondition/provider fails */}
+      {errorMessage && (
+        <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
+      )}
+
+      {/* AI Draft Suggestion Box */}
+      {aiDraft && aiDraft.data?.scope && (
+        <AiDraftCard
+          title="Suggested Training Scope"
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          isLoading={isGenerating}
+          onApply={handleApplyDraft}
+          onDismiss={() => setAiDraft(null)}
+          onRegenerate={handleGenerate}
+        >
+          <div className="space-y-2">
+            <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">
+              Proposed Scope:
+            </h4>
+            <p className="text-gray-700 leading-relaxed whitespace-pre-line text-sm">
+              {aiDraft.data.scope}
+            </p>
+          </div>
+        </AiDraftCard>
+      )}
 
       {/* Keywords section */}
       <div className="border-[0.5px] border-[#CED4DA] rounded-md p-6 bg-white mb-4">
@@ -29,8 +125,12 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
             </span>
           )) || (
             <>
-              <span className="inline-flex items-center px-3 py-1 rounded-md text-sm font-medium bg-[#1D4ED8] text-white">AI</span>
-              <span className="inline-flex items-center px-3 py-1 rounded-md text-sm font-medium bg-[#1D4ED8] text-white">ML</span>
+              <span className="inline-flex items-center px-3 py-1 rounded-md text-sm font-medium bg-[#1D4ED8] text-white">
+                AI
+              </span>
+              <span className="inline-flex items-center px-3 py-1 rounded-md text-sm font-medium bg-[#1D4ED8] text-white">
+                ML
+              </span>
             </>
           )}
         </div>
@@ -40,9 +140,19 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
         {/* Scope */}
         <AccordionItem title="Scope" defaultOpen={true}>
           <div>
-            <h4 className="text-gray-700 font-medium mb-1">Scope Description:</h4>
-            <p className="text-gray-600 text-sm md:text-base leading-relaxed">
-              {trainingProfile?.scope || 'The AI/ML Residency Program is a two-month, project-based training program...'}
+            <div className="flex items-center justify-between mb-1">
+              <h4 className="text-gray-700 font-medium">Scope Description:</h4>
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1"
+              >
+                <Sparkles className="w-3 h-3" />
+                Refine with AI
+              </button>
+            </div>
+            <p className="text-gray-600 text-sm md:text-base leading-relaxed whitespace-pre-line">
+              {currentScope}
             </p>
           </div>
         </AccordionItem>
@@ -70,9 +180,12 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
         {/* Competency Outcomes */}
         <AccordionItem title="Competency Outcomes">
           <div>
-            <h4 className="text-gray-700 font-medium mb-1">Competency Outcomes / Professional Background:</h4>
+            <h4 className="text-gray-700 font-medium mb-1">
+              Competency Outcomes / Professional Background:
+            </h4>
             <p className="text-gray-600 text-sm md:text-base leading-relaxed">
-              {trainingProfile?.professionalBackground || 'Upon successful completion of Phase 1 of the AI/ML Residency Program, residents will be able to collaborate in engineering teams, build production-grade AI solutions, and deploy machine learning models.'}
+              {trainingProfile?.professionalBackground ||
+                'Upon successful completion of Phase 1 of the AI/ML Residency Program, residents will be able to collaborate in engineering teams, build production-grade AI solutions, and deploy machine learning models.'}
             </p>
           </div>
         </AccordionItem>
@@ -111,7 +224,9 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
             {trainingProfile?.learnerStylePreferences?.map((style: any) => (
               <div key={style.id} className="p-3 bg-gray-50 rounded-md border border-gray-100">
                 <p className="font-medium text-gray-900">{style.name}</p>
-                {style.description && <p className="text-sm text-gray-500 mt-1">{style.description}</p>}
+                {style.description && (
+                  <p className="text-sm text-gray-500 mt-1">{style.description}</p>
+                )}
               </div>
             ))}
           </div>
@@ -123,7 +238,9 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
             {trainingProfile?.deliveryTools?.map((tool: any) => (
               <div key={tool.id} className="p-3 bg-gray-50 rounded-md border border-gray-100">
                 <p className="font-medium text-gray-900">{tool.name.trim()}</p>
-                {tool.description && <p className="text-sm text-gray-500 mt-1">{tool.description}</p>}
+                {tool.description && (
+                  <p className="text-sm text-gray-500 mt-1">{tool.description}</p>
+                )}
               </div>
             ))}
           </div>
@@ -136,7 +253,10 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
               <h4 className="text-gray-700 font-medium mb-2">Learner Technological Requirements:</h4>
               <div className="space-y-2">
                 {trainingProfile?.learnerTechnologicalRequirements?.map((req: any) => (
-                  <div key={req.id} className="p-2.5 bg-gray-50 rounded border border-gray-100 text-sm text-gray-700">
+                  <div
+                    key={req.id}
+                    className="p-2.5 bg-gray-50 rounded border border-gray-100 text-sm text-gray-700"
+                  >
                     <span className="font-semibold">{req.name}</span>
                     {req.description && req.description !== 'None' && ` - ${req.description}`}
                   </div>
@@ -144,10 +264,15 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data }) 
               </div>
             </div>
             <div>
-              <h4 className="text-gray-700 font-medium mb-2">Instructor Technological Requirements:</h4>
+              <h4 className="text-gray-700 font-medium mb-2">
+                Instructor Technological Requirements:
+              </h4>
               <div className="space-y-2">
                 {trainingProfile?.instructorTechnologicalRequirements?.map((req: any) => (
-                  <div key={req.id} className="p-2.5 bg-gray-50 rounded border border-gray-100 text-sm text-gray-700">
+                  <div
+                    key={req.id}
+                    className="p-2.5 bg-gray-50 rounded border border-gray-100 text-sm text-gray-700"
+                  >
                     <span className="font-semibold">{req.name}</span>
                     {req.description && req.description !== 'None' && ` - ${req.description}`}
                   </div>

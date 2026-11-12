@@ -14,24 +14,24 @@ import { ElevenLabsWidget } from './components/assistant/ElevenLabsWidget';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
-  const [data] = useState(MOCK_TRAINING_DATA as any);
+  const [data, setData] = useState(MOCK_TRAINING_DATA as any);
 
   const renderTabContent = () => {
     switch (activeTab) {
       case 'overview':
         return <OverviewTab data={data} />;
       case 'training_profile':
-        return <TrainingProfileTab data={data} />;
+        return <TrainingProfileTab data={data} onUpdateData={setData} />;
       case 'audience_profile':
         return <AudienceProfileTab data={data} />;
       case 'module':
-        return <ModuleTab data={data} />;
+        return <ModuleTab data={data} onUpdateData={setData} />;
       case 'survey':
-        return <SurveyTab data={data} />;
+        return <SurveyTab data={data} onUpdateData={setData} />;
       case 'assessment':
-        return <AssessmentTab data={data} />;
+        return <AssessmentTab data={data} onUpdateData={setData} />;
       case 'content':
-        return <ContentTab data={data} />;
+        return <ContentTab data={data} onUpdateData={setData} />;
       default:
         return <OverviewTab data={data} />;
     }

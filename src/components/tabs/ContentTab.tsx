@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, Search, FileText, ExternalLink, Download, CheckCircle, Clock } from 'lucide-react';
+import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData } from '../../api/tabs';
+import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface ContentTabProps {
   data: TrainingData;
+  onUpdateData?: (updated: any) => void;
 }
 
-export const ContentTab: React.FC<ContentTabProps> = ({ data }) => {
+export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) => {
   const [contents, setContents] = useState(data.contents || []);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedModule, setSelectedModule] = useState('ALL');
@@ -17,6 +20,21 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data }) => {
   const [newModule, setNewModule] = useState(
     data.modules?.[0]?.name || 'Phase One Final Research'
   );
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiDraft, setAiDraft] = useState<TabDraftResponse<ContentDescriptionDraftData> | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Check cached draft on mount
+  useEffect(() => {
+    getCachedDraft<ContentDescriptionDraftData>('content-description', trainingId).then((draft) => {
+      if (draft && draft.data?.contents?.length) {
+        setAiDraft(draft);
+      }
+    });
+  }, [trainingId]);
 
   const modulesList = Array.from(
     new Set((data.contents || []).map((c) => c.moduleName).filter(Boolean))
@@ -34,6 +52,50 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data }) => {
     return matchesSearch && matchesModule;
   });
 
+  const handleGenerate = async () => {
+    // Prerequisite check from guide: Modules and lessons must exist
+    if (!data.modules || data.modules.length === 0) {
+      setErrorMessage('Please generate/save the earlier tab first (Modules and lessons must exist).');
+      return;
+    }
+
+    setIsGenerating(true);
+    setErrorMessage(null);
+    try {
+      const response = await generateTabDraft<ContentDescriptionDraftData>('content-description', trainingId);
+      setAiDraft(response);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleApplyDraft = () => {
+    if (aiDraft?.data?.contents) {
+      const newItems = aiDraft.data.contents.map((c, i) => ({
+        id: `content-ai-${i}-${Date.now()}`,
+        name: c.lesson_title,
+        description: `${c.content_description}\n\nKey Takeaways:\n${c.key_takeaways.map((t) => `• ${t}`).join('\n')}`,
+        contentLevel: 'LESSON',
+        contentFileType: 'PDF',
+        contentStatus: 'ACCEPTED',
+        moduleName: data.modules?.[0]?.name || 'Module 1: Foundations',
+        contentDeveloper: {
+          email: 'gemma-ai@gheero.et',
+          role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
+        },
+      }));
+
+      const updated = [...newItems as any, ...contents];
+      setContents(updated);
+      if (onUpdateData) {
+        onUpdateData({ ...data, contents: updated });
+      }
+      setAiDraft(null);
+    }
+  };
+
   const handleAddContent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -50,7 +112,11 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data }) => {
         role: { name: 'ROLE_CONTENT_DEVELOPER', colorCode: '#Content Developer' },
       },
     };
-    setContents([newContent as any, ...contents]);
+    const updated = [newContent as any, ...contents];
+    setContents(updated);
+    if (onUpdateData) {
+      onUpdateData({ ...data, contents: updated });
+    }
     setNewName('');
     setNewDesc('');
     setIsAddOpen(false);
@@ -60,19 +126,83 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data }) => {
     <div className="px-[7%] py-10 mb-10">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-md md:text-xl text-black mb-1 font-semibold">Content</h1>
+          <h1 className="text-md md:text-xl text-black mb-1 font-semibold">Content Description</h1>
           <h2 className="text-md md:text-lg text-gray-500 font-normal">
-            Learning materials, research assignments, discussion topics, and references
+            Learning materials, lesson walkthroughs, key takeaways, and research resources
           </h2>
         </div>
-        <button
-          onClick={() => setIsAddOpen(true)}
-          className="bg-brand text-white px-5 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm self-start md:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Content</span>
-        </button>
+
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          {/* AI Generator Button */}
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
+          >
+            {isGenerating ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-cyan-200" />
+            )}
+            <span>{isGenerating ? 'Generating...' : 'Suggest Content with AI'}</span>
+          </button>
+
+          {/* Manual Add Button */}
+          <button
+            onClick={() => setIsAddOpen(true)}
+            className="bg-brand text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Content</span>
+          </button>
+        </div>
       </div>
+
+      {/* Error banner */}
+      {errorMessage && (
+        <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
+      )}
+
+      {/* AI Draft Suggestion Card */}
+      {aiDraft && aiDraft.data?.contents && (
+        <AiDraftCard
+          title="Suggested Lesson Content & Takeaways"
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          isLoading={isGenerating}
+          onApply={handleApplyDraft}
+          onDismiss={() => setAiDraft(null)}
+          onRegenerate={handleGenerate}
+        >
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">
+              The AI synthesized {aiDraft.data.contents.length} lesson walkthroughs with key learning takeaways:
+            </p>
+            <div className="space-y-3">
+              {aiDraft.data.contents.map((c, idx) => (
+                <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h5 className="font-bold text-gray-900 text-sm">{c.lesson_title}</h5>
+                    <span className="text-[11px] font-mono bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
+                      ID: {c.lesson_id}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-700 leading-relaxed">{c.content_description}</p>
+                  <div className="pt-1.5 border-t border-gray-200">
+                    <span className="text-[11px] font-semibold text-gray-700 block mb-1">
+                      Key Takeaways:
+                    </span>
+                    <ul className="list-disc list-inside text-xs text-gray-600 space-y-0.5">
+                      {c.key_takeaways.map((t, ti) => (
+                        <li key={ti}>{t}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </AiDraftCard>
+      )}
 
       {/* Filters & Search */}
       <div className="flex flex-col sm:flex-row gap-4 mb-6">

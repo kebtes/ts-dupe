@@ -1,17 +1,77 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, MoreVertical, Eye, CheckCircle2 } from 'lucide-react';
+import { Plus, MoreVertical, Eye, CheckCircle2, Sparkles, RefreshCw, HelpCircle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, AssessmentDraftData } from '../../api/tabs';
+import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface AssessmentTabProps {
   data: TrainingData;
+  onUpdateData?: (updated: any) => void;
 }
 
-export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data }) => {
+export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData }) => {
   const [assessments, setAssessments] = useState(data.assessments || []);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [name, setName] = useState('');
   const [target, setTarget] = useState('INDIVIDUAL');
   const [weight, setWeight] = useState(10);
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiDraft, setAiDraft] = useState<TabDraftResponse<AssessmentDraftData> | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Check cached draft on mount
+  useEffect(() => {
+    getCachedDraft<AssessmentDraftData>('assessment', trainingId).then((draft) => {
+      if (draft && draft.data?.questions?.length) {
+        setAiDraft(draft);
+      }
+    });
+  }, [trainingId]);
+
+  const handleGenerate = async () => {
+    // Prerequisite check from guide: Modules and lessons must exist
+    if (!data.modules || data.modules.length === 0) {
+      setErrorMessage('Please generate/save the earlier tab first (Modules and lessons must exist before generating assessments).');
+      return;
+    }
+
+    setIsGenerating(true);
+    setErrorMessage(null);
+    try {
+      const response = await generateTabDraft<AssessmentDraftData>('assessment', trainingId);
+      setAiDraft(response);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleApplyDraft = () => {
+    if (aiDraft?.data?.questions) {
+      const newAssessments = aiDraft.data.questions.map((q, idx) => ({
+        id: `ass-ai-${idx}-${Date.now()}`,
+        name: `AI Quiz: ${q.question.slice(0, 50)}...`,
+        type: 'MCQ_QUIZ',
+        target: 'INDIVIDUAL',
+        weight: Math.round(100 / (aiDraft.data.questions.length || 1)),
+        assignedTo: 'All Cohorts',
+        cohort: 'Residency Cohort 1',
+        approvalStatus: 'APPROVED',
+        mcqDetails: q,
+      }));
+
+      const updated = [...newAssessments as any, ...assessments];
+      setAssessments(updated);
+      if (onUpdateData) {
+        onUpdateData({ ...data, assessments: updated });
+      }
+      setAiDraft(null);
+    }
+  };
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,7 +86,11 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data }) => {
       cohort: 'Not assigned',
       approvalStatus: 'APPROVED',
     };
-    setAssessments([...assessments, newAss as any]);
+    const updated = [...assessments, newAss as any];
+    setAssessments(updated);
+    if (onUpdateData) {
+      onUpdateData({ ...data, assessments: updated });
+    }
     setName('');
     setIsModalOpen(false);
   };
@@ -37,18 +101,97 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data }) => {
         <div>
           <h1 className="text-md md:text-xl text-black mb-1 font-semibold">Assessment</h1>
           <h2 className="text-md md:text-lg text-gray-500 font-normal">
-            Manage course assessments, rubrics, weightings, and approvals
+            Manage course assessments, rubrics, weightings, and AI-suggested quizzes
           </h2>
         </div>
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="bg-brand text-white px-5 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm self-start md:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>New Assessment</span>
-        </button>
+
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          {/* AI Generator Button */}
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
+          >
+            {isGenerating ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-cyan-200" />
+            )}
+            <span>{isGenerating ? 'Generating...' : 'Generate Quizzes with AI'}</span>
+          </button>
+
+          {/* Manual Add Button */}
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="bg-brand text-white px-5 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Assessment</span>
+          </button>
+        </div>
       </div>
 
+      {/* Error banner */}
+      {errorMessage && (
+        <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
+      )}
+
+      {/* AI Draft Suggestion Box */}
+      {aiDraft && aiDraft.data?.questions && (
+        <AiDraftCard
+          title="Suggested MCQs & Assessments"
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          isLoading={isGenerating}
+          onApply={handleApplyDraft}
+          onDismiss={() => setAiDraft(null)}
+          onRegenerate={handleGenerate}
+        >
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">
+              The AI generated {aiDraft.data.questions.length} multiple-choice question(s) complete with options and answer rationales:
+            </p>
+            <div className="space-y-3">
+              {aiDraft.data.questions.map((q, idx) => (
+                <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2.5 text-xs">
+                  <div className="flex items-start gap-2">
+                    <HelpCircle className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                    <p className="font-bold text-gray-900 text-sm">{q.question}</p>
+                  </div>
+
+                  <div className="space-y-1.5 pl-6">
+                    {q.options.map((opt, oi) => (
+                      <div
+                        key={oi}
+                        className={`p-2 rounded border transition-colors ${
+                          opt.is_correct
+                            ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 font-medium'
+                            : 'bg-white border-gray-200 text-gray-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span>{opt.text}</span>
+                          {opt.is_correct && (
+                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
+                              CORRECT
+                            </span>
+                          )}
+                        </div>
+                        {opt.rationale && (
+                          <p className="text-[11px] text-gray-500 mt-0.5 italic">
+                            Rationale: {opt.rationale}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </AiDraftCard>
+      )}
+
+      {/* Table */}
       <div className="bg-white border-[0.5px] border-[#CED4DA] rounded-lg overflow-x-auto shadow-sm">
         <table className="w-full caption-bottom text-sm border-collapse">
           <thead>
@@ -68,7 +211,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data }) => {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {assessments.map((item) => (
+            {assessments.map((item: any) => (
               <tr
                 key={item.id}
                 className="hover:bg-gray-50/70 transition-colors duration-150"
@@ -77,7 +220,11 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data }) => {
                 <td className="py-4 px-5 text-gray-600 whitespace-nowrap">
                   <div className="flex flex-col">
                     <span className="font-medium text-gray-900">
-                      {item.type === 'SELF_GRADED' ? 'Self-graded' : item.type}
+                      {item.type === 'SELF_GRADED'
+                        ? 'Self-graded'
+                        : item.type === 'MCQ_QUIZ'
+                        ? 'AI MCQ Quiz'
+                        : item.type}
                     </span>
                     <span className="text-xs text-gray-500">Admin only</span>
                   </div>
