@@ -1,13 +1,13 @@
-# Training Section Dupe (UI Only)
+# Training Section Dupe with ElevenLabs AI Assistant RAG UI
 
 A faithful clone of the training curriculum administration section from:
 `https://gheero-management-staging.vercel.app/curriculum-admin/training/d734b694-0802-4a4a-8a51-eaa693a10abd`
 
-Built with a simple, modern, zero-backend approach using **Vite + React + TypeScript + Tailwind CSS**.
+Built with a clean, modern, zero-backend approach using **Vite + React + TypeScript + Tailwind CSS**.
 
-## Features & Included Tabs
+## Features & Included Components
 
-1. **Header**:
+1. **Header & Section Navigation**:
    - Navigation back button with `<ChevronLeft />`
    - Training title: `AI/ML Residency Program Training`
 2. **Tab Bar**:
@@ -27,6 +27,10 @@ Built with a simple, modern, zero-backend approach using **Vite + React + TypeSc
    - Full data table with columns for `Name`, `Assessment Type`, `Target`, `Weight`, `Assigned To`, `Cohort`, `Approval Status`, and `Actions`, plus interactive "+ New Assessment" modal
 9. **Content Tab**:
    - Real research documents, lesson assignments, discussion topics, search filter, module filter, and "+ Add Content" modal
+10. **ElevenLabs Conversational AI RAG Assistant (Bottom-Right)**:
+   - **Floating Trigger Button**: Anchored to bottom right with dark pill design, ElevenLabs double-bar logo (`||`), ambient pulse glow, and live equalizer waveform.
+   - **Chat Mode with RAG Citations**: Direct knowledge base retrieval over the curriculum with cited sources (`Retrieved RAG Sources`), quick suggestion prompts, copy response, and text-to-speech voice playback.
+   - **Live Voice Mode**: Centered glowing, swirling 3D gradient ElevenLabs Voice Orb that reacts dynamically to states (`idle`, `listening`, `thinking`, `speaking`), waveform audio visualization, microphone mute/unmute, and disconnect controls.
 
 ## Getting Started
 
