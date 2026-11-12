@@ -10,6 +10,7 @@ import { ModuleTab } from './components/tabs/ModuleTab';
 import { SurveyTab } from './components/tabs/SurveyTab';
 import { AssessmentTab } from './components/tabs/AssessmentTab';
 import { ContentTab } from './components/tabs/ContentTab';
+import { ElevenLabsWidget } from './components/assistant/ElevenLabsWidget';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
@@ -37,8 +38,8 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-gray-900 font-sans">
-      <div className="opacity-100 transition-opacity duration-300 min-h-screen">
+    <div className="min-h-screen bg-white text-gray-900 font-sans relative">
+      <div className="opacity-100 transition-opacity duration-300 min-h-screen pb-16">
         {/* Top Header */}
         <Header
           title={data.training.title}
@@ -55,6 +56,9 @@ export function App() {
           {renderTabContent()}
         </main>
       </div>
+
+      {/* ElevenLabs Conversational AI RAG Assistant (Bottom Right) */}
+      <ElevenLabsWidget />
     </div>
   );
 }
