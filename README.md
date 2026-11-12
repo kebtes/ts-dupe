@@ -1,4 +1,4 @@
-# Training Section Dupe with AI Curriculum Generator & ElevenLabs Assistant
+# Training Section Dupe with AI Curriculum Generator & Assistant UI
 
 A faithful clone of the training curriculum administration section from:
 `https://gheero-management-staging.vercel.app/curriculum-admin/training/d734b694-0802-4a4a-8a51-eaa693a10abd`
@@ -23,7 +23,7 @@ Each tab integrates the backend curriculum generation endpoints:
 - **Draft Cards**: User can review the AI-suggested draft, model badge (`gemma4:31b-cloud`), regenerate, or click *"Apply to Curriculum"* to commit it directly to the active tab.
 
 ## Bottom-Right Assistant
-- Floating trigger button anchored at bottom-right (`fixed bottom-6 right-6`) with the ElevenLabs double-bar logo (`||`).
+- Floating trigger button anchored at bottom-right (`fixed bottom-6 right-6`) with the assistant double-bar logo (`||`).
 - RAG retrieval engine indexing training data, answering questions about modules, prerequisites, passing score, and assessments with cited sources.
 
 ## Getting Started
