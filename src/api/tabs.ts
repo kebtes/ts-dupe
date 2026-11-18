@@ -359,22 +359,30 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
  */
 export async function generateTabDraft<T = any>(
   tab: TabName,
-  trainingId: string,
-  target?: { target_type: string; target_id: string }
+  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd',
+  target?: { kind?: string; id?: string; target_type?: string; target_id?: string }
 ): Promise<TabDraftResponse<T>> {
   try {
     const controller = new AbortController();
     // Allow up to 120 seconds for backend LLM generation
     const timeoutId = setTimeout(() => controller.abort(), 120000);
 
+    const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+    const payload: Record<string, any> = {
+      training_id: finalTrainingId,
+    };
+    if (target && ((target as any).kind || (target as any).target_type)) {
+      payload.target = {
+        kind: (target as any).kind || (target as any).target_type,
+        id: (target as any).id || (target as any).target_id,
+      };
+    }
+
     const response = await fetch(`${API_BASE}/v1/training-tabs/${tab}`, {
       method: 'POST',
       headers: DEFAULT_HEADERS,
       signal: controller.signal,
-      body: JSON.stringify({
-        training_id: trainingId,
-        target: target ?? null,
-      }),
+      body: JSON.stringify(payload),
     });
 
     clearTimeout(timeoutId);
@@ -423,14 +431,15 @@ export async function generateTabDraft<T = any>(
  */
 export async function getCachedDraft<T = any>(
   tab: TabName,
-  trainingId: string
+  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd'
 ): Promise<TabDraftResponse<T> | null> {
+  const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     const response = await fetch(
-      `${API_BASE}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(trainingId)}`,
+      `${API_BASE}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(finalTrainingId)}`,
       {
         method: 'GET',
         headers: DEFAULT_HEADERS,
@@ -441,17 +450,17 @@ export async function getCachedDraft<T = any>(
     clearTimeout(timeoutId);
 
     if (response.status === 404) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
     }
 
     if (!response.ok) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
     }
 
     const result = await response.json();
-    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = result;
+    LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] = result;
     return result;
   } catch (err) {
-    return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+    return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
   }
 }
