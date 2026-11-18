@@ -392,6 +392,7 @@ export async function generateTabDraft<T = any>(
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       const message =
+        errorData.message ||
         errorData.detail?.message ||
         errorData.detail ||
         (response.status === 422 || response.status === 400
