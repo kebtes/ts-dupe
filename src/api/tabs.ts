@@ -69,30 +69,49 @@ export interface ContentDescriptionDraftData {
   contents: ContentDescriptionItem[];
 }
 
-export interface SurveyQuestion {
-  question: string;
+export interface SurveyQuestionItem {
+  prompt?: string;
+  question?: string;
   type: string;
-  order: number;
+  order?: number;
+  options?: string[];
+}
+
+export interface SurveySectionItem {
+  title: string;
+  questions: SurveyQuestionItem[];
 }
 
 export interface SurveyDraftData {
-  questions: SurveyQuestion[];
+  questions?: SurveyQuestionItem[];
+  sections?: SurveySectionItem[];
 }
 
 export interface AssessmentOption {
-  text: string;
-  is_correct: boolean;
-  rationale: string;
+  text?: string;
+  is_correct?: boolean;
+  rationale?: string;
 }
 
-export interface AssessmentQuestion {
-  lesson_id: string;
-  question: string;
-  options: AssessmentOption[];
+export interface AssessmentQuestionItem {
+  lesson_id?: string;
+  prompt?: string;
+  question?: string;
+  type?: string;
+  weight?: number;
+  options?: (AssessmentOption | string)[];
+  correct_answer?: string;
+  rubric?: any;
+}
+
+export interface AssessmentSectionItem {
+  title: string;
+  questions: AssessmentQuestionItem[];
 }
 
 export interface AssessmentDraftData {
-  questions: AssessmentQuestion[];
+  questions?: AssessmentQuestionItem[];
+  sections?: AssessmentSectionItem[];
   uncovered_lessons?: string[];
 }
 
