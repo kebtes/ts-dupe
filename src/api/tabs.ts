@@ -1,12 +1,13 @@
 // src/api/tabs.ts
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000';
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8002';
+const COMPANY_ID = (import.meta as any).env?.VITE_COMPANY_ID || '816e9eab-f109-4de2-b7aa-154f8cb2ac67';
 
 const DEFAULT_HEADERS = {
   'Content-Type': 'application/json',
   'Authorization': 'Bearer dev-token',
   'X-TSP-User-ID': 'designer-1',
-  'X-TSP-Company-ID': 'co-1',
+  'X-TSP-Company-ID': COMPANY_ID,
   'X-TSP-Role': 'designer',
 };
 
@@ -363,7 +364,8 @@ export async function generateTabDraft<T = any>(
 ): Promise<TabDraftResponse<T>> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    // Allow up to 120 seconds for backend LLM generation
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     const response = await fetch(`${API_BASE}/v1/training-tabs/${tab}`, {
       method: 'POST',
