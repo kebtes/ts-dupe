@@ -2,13 +2,15 @@
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8002';
 const COMPANY_ID = (import.meta as any).env?.VITE_COMPANY_ID || '816e9eab-f109-4de2-b7aa-154f8cb2ac67';
+const USER_ROLE = (import.meta as any).env?.VITE_USER_ROLE || 'admin';
+const USER_ID = (import.meta as any).env?.VITE_USER_ID || 'designer-1';
 
 const DEFAULT_HEADERS = {
   'Content-Type': 'application/json',
   'Authorization': 'Bearer dev-token',
-  'X-TSP-User-ID': 'designer-1',
+  'X-TSP-User-ID': USER_ID,
   'X-TSP-Company-ID': COMPANY_ID,
-  'X-TSP-Role': 'designer',
+  'X-TSP-Role': USER_ROLE,
 };
 
 export type TabName =
