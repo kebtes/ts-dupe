@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TrainingData } from '../../types';
-import { ChevronDown, MoreVertical, Plus, BookOpen, Sparkles, RefreshCw, Layers } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, ModuleDraftData } from '../../api/tabs';
+import { ChevronDown, MoreVertical, Plus, BookOpen, Sparkles, RefreshCw, Layers, AlertTriangle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ModuleDraftData, getActiveTrainingId } from '../../api/tabs';
+import { uiModulesFromStructure, type UiModuleRecord } from '../../api/adapters';
+import { useTrainingStructure } from '../../api/useTrainingStructure';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface ModuleTabProps {
@@ -16,11 +18,32 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
   const [newModuleName, setNewModuleName] = useState('');
   const [newModuleDesc, setNewModuleDesc] = useState('');
 
+  const trainingId = getActiveTrainingId(data.training?.id);
+  const {
+    structure,
+    loading: structureLoading,
+    error: structureError,
+    retry: retryStructure,
+  } = useTrainingStructure(trainingId);
+
+  // Swap the mock demo list for the real TSP modules once the structure
+  // loads — but never clobber modules the user added/applied in-session.
+  const userEditedRef = useRef(false);
+  useEffect(() => {
+    if (!structure) return;
+    if (userEditedRef.current) return;
+    const real: UiModuleRecord[] = uiModulesFromStructure(structure);
+    if (real.length > 0) {
+      setModules(real as any);
+      setOpenModuleId((current) =>
+        real.some((m) => m.id === current) ? current : real[0].id
+      );
+    }
+  }, [structure]);
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<ModuleDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
 
   // Check cached draft on mount
   useEffect(() => {
@@ -41,6 +64,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
       setErrorMessage('Please generate/save the earlier tab first (Training Profile scope must exist).');
       return;
     }
+    if (isGenerating) return; // Prevent duplicate submissions
 
     setIsGenerating(true);
     setErrorMessage(null);
@@ -56,8 +80,9 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
 
   const handleApplyDraft = () => {
     if (aiDraft?.data?.modules) {
+      userEditedRef.current = true;
       const converted = aiDraft.data.modules.map((m, idx) => ({
-        id: m.id || `mod-ai-${idx}-${Date.now()}`,
+        id: `${m.id || `mod-ai-${idx}`}-${Date.now()}`,
         name: m.title,
         description: m.description,
         trainingTag: { name: 'AI Suggested' },
@@ -81,6 +106,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
   const handleAddModule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newModuleName.trim()) return;
+    userEditedRef.current = true;
     const newMod = {
       id: `module-${Date.now()}`,
       name: newModuleName,
@@ -120,7 +146,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Suggest Modules with AI'}</span>
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Suggest Modules with AI'}</span>
           </button>
 
           {/* Manual Add Button */}
@@ -134,6 +160,29 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
         </div>
       </div>
 
+      {/* Training structure status (real TSP records) */}
+      {structureLoading && (
+        <div className="mb-6 text-xs text-gray-500 px-3 py-2 border rounded-lg bg-gray-50 inline-flex items-center gap-2">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading real training structure from the backend…
+        </div>
+      )}
+      {!structureLoading && structureError && (
+        <div className="mb-6 flex items-center gap-2 border border-red-200 bg-red-50 text-red-700 rounded-lg p-3 text-xs">
+          <AlertTriangle className="w-4 h-4" />
+          <span>Could not load the real training structure ({structureError}) — showing demo data below.</span>
+          <button onClick={retryStructure} className="underline font-semibold hover:text-red-800">
+            Retry
+          </button>
+        </div>
+      )}
+      {!structureLoading && !structureError && structure && (
+        <div className="mb-6 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3 inline-flex items-center gap-2">
+          <BookOpen className="w-3.5 h-3.5" />
+          Showing {structure.modules.length} real module(s) from the backend training
+          {structure.title ? ` “${structure.title}”` : ''}.
+        </div>
+      )}
+
       {/* Error banner */}
       {errorMessage && (
         <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
@@ -144,6 +193,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
         <AiDraftCard
           title="Suggested Curriculum Modules"
           model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => setAiDraft(null)}
@@ -151,7 +201,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
         >
           <div className="space-y-4">
             <p className="text-xs text-gray-500">
-              The AI model generated {aiDraft.data.modules.length} recommended modules with topics and practical lab assignments:
+              The AI model generated {aiDraft.data.modules.length} recommended modules with lessons and practical lab assignments:
             </p>
             <div className="space-y-3">
               {aiDraft.data.modules.map((m, idx) => (
@@ -180,8 +230,8 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
                   {/* Lessons */}
                   {m.topics?.[0]?.lessons && (
                     <div className="pt-1 text-xs text-gray-600">
-                      <span className="font-medium text-gray-700">Topics & Lessons: </span>
-                      {m.topics[0].lessons.map((l) => `${l.title} (${l.duration}m)`).join(', ')}
+                      <span className="font-medium text-gray-700">Lessons: </span>
+                      {m.topics[0].lessons.map((l) => `${l.title} (${l.duration} ${l.duration_type.toLowerCase()})`).join(', ')}
                     </div>
                   )}
                 </div>
@@ -290,6 +340,30 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
                             </div>
                           ))}
                         </div>
+                      </div>
+                    )}
+
+                    {/* Real TSP lessons (flat list from the structure endpoint) */}
+                    {mod.lessons && mod.lessons.length > 0 && (
+                      <div className="space-y-2 pt-2 border-t border-gray-100">
+                        <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Lessons ({mod.lessons.length})
+                        </h5>
+                        <ul className="space-y-1.5">
+                          {mod.lessons.map((l: any, li: number) => (
+                            <li key={l.id || li} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
+                              <span className="font-bold text-gray-900">{l.title}</span>
+                              {l.objective && (
+                                <span className="text-gray-600"> &mdash; {l.objective}</span>
+                              )}
+                              {l.duration != null && (
+                                <span className="text-gray-500">
+                                  {' '}({l.duration} {(l.duration_type || '').toLowerCase()})
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     )}
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
 import { AccordionItem, AccordionGroup } from '../ui/Accordion';
 import { Sparkles, RefreshCw } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, TrainingProfileDraftData } from '../../api/tabs';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, TrainingProfileDraftData, getActiveTrainingId } from '../../api/tabs';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface TrainingProfileTabProps {
@@ -12,7 +12,7 @@ interface TrainingProfileTabProps {
 
 export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, onUpdateData }) => {
   const { trainingProfile, objectives, training } = data as any;
-  const trainingId = training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+  const trainingId = getActiveTrainingId(training?.id);
 
   const [currentScope, setCurrentScope] = useState<string>(
     trainingProfile?.scope ||
@@ -33,6 +33,7 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
   }, [trainingId]);
 
   const handleGenerate = async () => {
+    if (isGenerating) return; // Prevent duplicate submissions
     setIsGenerating(true);
     setErrorMessage(null);
     try {
@@ -82,7 +83,7 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
           ) : (
             <Sparkles className="w-4 h-4 text-cyan-200" />
           )}
-          <span>{isGenerating ? 'Generating Scope...' : 'Suggest with AI'}</span>
+          <span>{isGenerating ? 'Generating Scope... (may take up to 3 min)' : 'Suggest with AI'}</span>
         </button>
       </div>
 
@@ -96,6 +97,7 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
         <AiDraftCard
           title="Suggested Training Scope"
           model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => setAiDraft(null)}

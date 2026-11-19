@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData } from '../../api/tabs';
+import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData, getActiveTrainingId, ContentTargetOption } from '../../api/tabs';
+import { buildContentTargets } from '../../api/adapters';
+import { useTrainingStructure } from '../../api/useTrainingStructure';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface ContentTabProps {
@@ -21,11 +23,46 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
     data.modules?.[0]?.name || 'Phase One Final Research'
   );
 
+  /**
+   * Backend contract: content-description generation requires a target
+   * (kind: 'module' | 'lesson', id of a real record). The options come
+   * exclusively from the backend's read-only training structure endpoint —
+   * never from mock data. On failure there is NO mock fallback: the error is
+   * shown and generation is blocked until real records load.
+   */
+  const trainingId = getActiveTrainingId(data.training?.id);
+
+  const {
+    structure,
+    loading: structureLoading,
+    error: structureError,
+    retry: retryStructure,
+  } = useTrainingStructure(trainingId);
+
+  const targetOptions: ContentTargetOption[] = useMemo(
+    () => buildContentTargets(structure),
+    [structure]
+  );
+
+  const [selectedTargetId, setSelectedTargetId] = useState<string>('');
+
+  // Keep the selection on a valid target as the structure loads/changes.
+  useEffect(() => {
+    if (targetOptions.length === 0) {
+      setSelectedTargetId('');
+      return;
+    }
+    if (!targetOptions.some((t) => t.id === selectedTargetId)) {
+      setSelectedTargetId(targetOptions[0].id);
+    }
+  }, [targetOptions]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectedTarget: ContentTargetOption | null =
+    targetOptions.find((t) => t.id === selectedTargetId) ?? null;
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<ContentDescriptionDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
 
   // Check cached draft on mount
   useEffect(() => {
@@ -53,16 +90,27 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   });
 
   const handleGenerate = async () => {
-    // Prerequisite check from guide: Modules and lessons must exist
-    if (!data.modules || data.modules.length === 0) {
-      setErrorMessage('Please generate/save the earlier tab first (Modules and lessons must exist).');
+    if (isGenerating) return; // Prevent duplicate submissions
+
+    // Backend contract: a real target record (kind + id) is required, and it
+    // must come from the loaded training structure — never from mock data.
+    if (structureLoading || structureError || !selectedTarget) {
+      setErrorMessage(
+        structureError
+          ? `Cannot generate yet: ${structureError}`
+          : 'Loading the training structure — select a module or lesson target once it loads.'
+      );
       return;
     }
 
     setIsGenerating(true);
     setErrorMessage(null);
     try {
-      const response = await generateTabDraft<ContentDescriptionDraftData>('content-description', trainingId);
+      const response = await generateTabDraft<ContentDescriptionDraftData>(
+        'content-description',
+        trainingId,
+        { kind: selectedTarget.kind, id: selectedTarget.id }
+      );
       setAiDraft(response);
     } catch (err: any) {
       setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
@@ -73,19 +121,25 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
 
   const handleApplyDraft = () => {
     if (aiDraft?.data?.contents) {
-      const newItems = aiDraft.data.contents.map((c, i) => ({
-        id: `content-ai-${i}-${Date.now()}`,
-        name: c.lesson_title,
-        description: `${c.content_description}\n\nKey Takeaways:\n${c.key_takeaways.map((t) => `• ${t}`).join('\n')}`,
-        contentLevel: 'LESSON',
-        contentFileType: 'PDF',
-        contentStatus: 'ACCEPTED',
-        moduleName: data.modules?.[0]?.name || 'Module 1: Foundations',
-        contentDeveloper: {
-          email: 'gemma-ai@gheero.et',
-          role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
-        },
-      }));
+      const newItems = aiDraft.data.contents.map((c, i) => {
+        const takeaways =
+          c.key_takeaways && c.key_takeaways.length > 0
+            ? `\n\nKey Takeaways:\n${c.key_takeaways.map((t) => `• ${t}`).join('\n')}`
+            : '';
+        return {
+          id: `content-ai-${i}-${Date.now()}`,
+          name: c.lesson_title || 'AI Suggested Content',
+          description: `${c.content_description}${takeaways}`,
+          contentLevel: 'LESSON',
+          contentFileType: 'PDF',
+          contentStatus: 'ACCEPTED',
+          moduleName: data.modules?.[0]?.name || 'Module 1: Foundations',
+          contentDeveloper: {
+            email: 'gemma-ai@gheero.et',
+            role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
+          },
+        };
+      });
 
       const updated = [...newItems as any, ...contents];
       setContents(updated);
@@ -133,10 +187,46 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
+          {/* Target selector (backend requires kind + id of a real record) */}
+          {structureLoading && (
+            <span className="text-xs text-gray-500 px-2 py-2">Loading training structure…</span>
+          )}
+          {!structureLoading && structureError && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-red-600 bg-red-50 border border-red-200 px-2.5 py-2 rounded-md">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Training structure unavailable</span>
+              <button
+                onClick={retryStructure}
+                className="ml-1 underline font-semibold text-red-700 hover:text-red-800"
+              >
+                Retry
+              </button>
+            </span>
+          )}
+          {!structureLoading && !structureError && targetOptions.length === 0 && (
+            <span className="text-xs text-gray-500 px-2 py-2">
+              No modules or lessons found for this training.
+            </span>
+          )}
+          {targetOptions.length > 0 && (
+            <select
+              value={selectedTargetId || targetOptions[0]?.id || ''}
+              onChange={(e) => setSelectedTargetId(e.target.value)}
+              disabled={isGenerating || structureLoading || !!structureError}
+              className="border border-gray-300 rounded-md text-xs px-2.5 py-2 bg-white text-gray-700 max-w-[220px] disabled:opacity-50"
+              title="Content target for AI generation (real TSP records)"
+            >
+              {targetOptions.map((t) => (
+                <option key={`${t.kind}-${t.id}`} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          )}
           {/* AI Generator Button */}
           <button
             onClick={handleGenerate}
-            disabled={isGenerating}
+            disabled={isGenerating || structureLoading || !!structureError || !selectedTarget}
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
           >
             {isGenerating ? (
@@ -144,7 +234,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Suggest Content with AI'}</span>
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Suggest Content with AI'}</span>
           </button>
 
           {/* Manual Add Button */}
@@ -166,8 +256,9 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
       {/* AI Draft Suggestion Card */}
       {aiDraft && aiDraft.data?.contents && (
         <AiDraftCard
-          title="Suggested Lesson Content & Takeaways"
+          title="Suggested Lesson Content"
           model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => setAiDraft(null)}
@@ -175,28 +266,41 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         >
           <div className="space-y-4">
             <p className="text-xs text-gray-500">
-              The AI synthesized {aiDraft.data.contents.length} lesson walkthroughs with key learning takeaways:
+              The AI generated {aiDraft.data.contents.length} content description(s) for the selected target:
             </p>
             <div className="space-y-3">
               {aiDraft.data.contents.map((c, idx) => (
                 <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h5 className="font-bold text-gray-900 text-sm">{c.lesson_title}</h5>
-                    <span className="text-[11px] font-mono bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
-                      ID: {c.lesson_id}
-                    </span>
+                  <div className="flex items-center justify-between flex-wrap gap-1">
+                    <h5 className="font-bold text-gray-900 text-sm">
+                      {c.lesson_title || 'Selected target'}
+                      {aiDraft.data.target?.kind ? (
+                        <span className="ml-2 text-[10px] font-mono uppercase text-gray-400">
+                          {aiDraft.data.target.kind}
+                        </span>
+                      ) : null}
+                    </h5>
+                    {c.lesson_id && (
+                      <span className="text-[11px] font-mono bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
+                        ID: {c.lesson_id}
+                      </span>
+                    )}
                   </div>
-                  <p className="text-xs text-gray-700 leading-relaxed">{c.content_description}</p>
-                  <div className="pt-1.5 border-t border-gray-200">
-                    <span className="text-[11px] font-semibold text-gray-700 block mb-1">
-                      Key Takeaways:
-                    </span>
-                    <ul className="list-disc list-inside text-xs text-gray-600 space-y-0.5">
-                      {c.key_takeaways.map((t, ti) => (
-                        <li key={ti}>{t}</li>
-                      ))}
-                    </ul>
-                  </div>
+                  <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-line">
+                    {c.content_description}
+                  </p>
+                  {c.key_takeaways.length > 0 && (
+                    <div className="pt-1.5 border-t border-gray-200">
+                      <span className="text-[11px] font-semibold text-gray-700 block mb-1">
+                        Key Takeaways:
+                      </span>
+                      <ul className="list-disc list-inside text-xs text-gray-600 space-y-0.5">
+                        {c.key_takeaways.map((t, ti) => (
+                          <li key={ti}>{t}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
