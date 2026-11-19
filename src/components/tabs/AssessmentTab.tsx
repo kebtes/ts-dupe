@@ -143,6 +143,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData
           title="Suggested Assessments & Module Rubrics"
           model={aiDraft.model || 'gemma4:31b-cloud'}
           source={aiDraft.source}
+          warnings={aiDraft.warnings}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => setAiDraft(null)}
@@ -154,9 +155,11 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData
               <div className="flex items-start gap-2.5 border border-amber-300 bg-amber-50 text-amber-900 rounded-lg p-3 text-xs">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-bold uppercase tracking-wide">Lessons without assessment coverage</p>
+                  <p className="font-bold uppercase tracking-wide">Lessons without lesson-linked content</p>
                   <p className="mt-0.5">
-                    The backend reports no generated questions for: {aiDraft.uncovered_lessons.join(', ')}.
+                    These recorded lessons have no lesson-linked content item,
+                    so their assessment coverage may be limited (they can only
+                    be assessed on their recorded topic): {aiDraft.uncovered_lessons.join(', ')}.
                   </p>
                 </div>
               </div>

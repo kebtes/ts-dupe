@@ -138,6 +138,7 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
           title="Suggested Learner Feedback Survey"
           model={aiDraft.model || 'gemma4:31b-cloud'}
           source={aiDraft.source}
+          warnings={aiDraft.warnings}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => setAiDraft(null)}

@@ -6,6 +6,8 @@ interface AiDraftCardProps {
   model?: string;
   /** 'offline-mock' = local demo fallback, NOT live AI output. */
   source?: 'backend' | 'offline-mock';
+  /** Non-blocking advisory warnings from the backend envelope. */
+  warnings?: string[];
   onApply: () => void;
   onDismiss: () => void;
   onRegenerate?: () => void;
@@ -17,6 +19,7 @@ export const AiDraftCard: React.FC<AiDraftCardProps> = ({
   title,
   model = 'gemma4:31b-cloud',
   source = 'backend',
+  warnings = [],
   onApply,
   onDismiss,
   onRegenerate,
@@ -86,6 +89,24 @@ export const AiDraftCard: React.FC<AiDraftCardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Advisory warnings: non-blocking, clearly distinct from errors. */}
+      {warnings.length > 0 && (
+        <div className="border border-amber-300 bg-amber-50 text-amber-900 rounded-lg p-3 text-xs space-y-1.5">
+          <p className="font-bold uppercase tracking-wide flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            Advisory warnings ({warnings.length})
+          </p>
+          <ul className="list-disc list-inside space-y-1">
+            {warnings.map((warning, wi) => (
+              <li key={wi}>{warning}</li>
+            ))}
+          </ul>
+          <p className="text-amber-700">
+            These do not block the draft — review them before applying.
+          </p>
+        </div>
+      )}
 
       <div className="bg-white rounded-lg p-4 border border-indigo-100 text-sm text-gray-800 shadow-2xs">
         {children}
