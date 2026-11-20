@@ -386,7 +386,15 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
 export async function generateTabDraft<T = any>(
   tab: TabName,
   trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd',
-  target?: { kind?: string; id?: string; target_type?: string; target_id?: string }
+  target?: {
+    kind?: string;
+    id?: string;
+    target_type?: string;
+    target_id?: string;
+    title?: string;
+    name?: string;
+    description?: string;
+  }
 ): Promise<TabDraftResponse<T>> {
   try {
     const controller = new AbortController();
@@ -401,6 +409,9 @@ export async function generateTabDraft<T = any>(
       payload.target = {
         kind: (target as any).kind || (target as any).target_type,
         id: (target as any).id || (target as any).target_id,
+        title: (target as any).title,
+        name: (target as any).name,
+        description: (target as any).description,
       };
     }
 

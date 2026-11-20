@@ -43,8 +43,8 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   });
 
   const fetchModuleSuggestion = async (modName: string) => {
-    const targetMod = data.modules?.find(
-      (m) => m.name === modName || m.id === modName
+    const targetMod: any = data.modules?.find(
+      (m: any) => m.name === modName || m.id === modName || m.title === modName
     ) || data.modules?.[0];
 
     if (!targetMod) return;
@@ -55,13 +55,19 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
       const response = await generateTabDraft<ContentDescriptionDraftData>(
         'content-description',
         trainingId,
-        { kind: 'module', id: targetMod.id }
+        {
+          kind: 'module',
+          id: targetMod.id,
+          title: targetMod.title || targetMod.name,
+          name: targetMod.name || targetMod.title,
+          description: targetMod.description,
+        }
       );
       if (response && response.data) {
         if (response.data.title) {
           setNewName(response.data.title);
         } else {
-          setNewName(`${targetMod.name} Resource Guide`);
+          setNewName(`${targetMod.name || targetMod.title} Resource Guide`);
         }
         if (response.data.description) {
           setNewDesc(response.data.description);
