@@ -7,9 +7,16 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface AssessmentTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  suggestedDraft?: any;
+  onDismissDraft?: () => void;
 }
 
-export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData }) => {
+export const AssessmentTab: React.FC<AssessmentTabProps> = ({
+  data,
+  onUpdateData,
+  suggestedDraft,
+  onDismissDraft,
+}) => {
   const [assessments, setAssessments] = useState(data.assessments || []);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [name, setName] = useState('');
@@ -21,6 +28,18 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Sync draft from Copilot
+  useEffect(() => {
+    if (suggestedDraft?.sections?.length || suggestedDraft?.questions?.length) {
+      setAiDraft({
+        status: 'success',
+        tab: 'assessment',
+        data: suggestedDraft,
+        model: 'gemma4:31b-cloud',
+      });
+    }
+  }, [suggestedDraft]);
 
   // Check cached draft on mount
   useEffect(() => {
@@ -89,6 +108,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData
         onUpdateData({ ...data, assessments: updated });
       }
       setAiDraft(null);
+      if (onDismissDraft) onDismissDraft();
     }
   };
 
@@ -162,7 +182,10 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData
           model={aiDraft.model || 'mimo-v2.6-flash'}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
-          onDismiss={() => setAiDraft(null)}
+          onDismiss={() => {
+            setAiDraft(null);
+            if (onDismissDraft) onDismissDraft();
+          }}
           onRegenerate={handleGenerate}
         >
           {aiDraft.data.sections ? (

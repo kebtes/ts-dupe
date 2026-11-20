@@ -28,6 +28,7 @@ interface ChatMessage {
   timestamp: string;
   clarification?: CopilotClarification;
   isDraftUpdated?: boolean;
+  updatedDraft?: any;
 }
 
 interface CurriculumCopilotProps {
@@ -155,6 +156,7 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         clarification: response.clarification,
         isDraftUpdated: response.response_type === 'UPDATE_DRAFT' && Boolean(response.updated_draft),
+        updatedDraft: response.updated_draft,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -275,9 +277,89 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
 
                     {/* Canvas Live Update Notification */}
                     {msg.isDraftUpdated && (
-                      <div className="mt-2.5 pt-2 border-t border-gray-100 flex items-center gap-1.5 text-xs text-emerald-600 font-semibold">
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>Canvas draft updated live</span>
+                      <div className="mt-2.5 pt-2 border-t border-gray-100 flex items-center justify-between text-xs text-emerald-600 font-semibold">
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Canvas draft updated live</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* AI Suggested Draft Output Preview */}
+                    {msg.updatedDraft && (
+                      <div className="mt-3 p-3 bg-gradient-to-br from-indigo-50/90 to-blue-50/90 rounded-xl border border-indigo-200 text-xs space-y-2 text-left">
+                        <div className="flex items-center justify-between font-semibold text-indigo-950">
+                          <div className="flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>AI Suggested Draft</span>
+                          </div>
+                          {msg.updatedDraft.modules && (
+                            <span className="text-[10px] bg-indigo-200/80 text-indigo-900 px-2 py-0.5 rounded-full font-bold">
+                              {msg.updatedDraft.modules.length} Modules
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Modules Preview */}
+                        {msg.updatedDraft.modules && (
+                          <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                            {msg.updatedDraft.modules.map((m: any, mIdx: number) => (
+                              <div key={mIdx} className="bg-white p-2.5 rounded-lg border border-indigo-100/90 shadow-2xs space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-gray-900 text-xs">
+                                    {m.title || m.name}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-gray-600 line-clamp-2">
+                                  {m.description}
+                                </p>
+                                {m.practical_assignment && (
+                                  <div className="text-[10px] text-indigo-800 bg-indigo-50/80 p-1.5 rounded font-medium">
+                                    🛠️ <strong>Lab:</strong> {m.practical_assignment.title}
+                                  </div>
+                                )}
+                                {(m.lessons || m.topics?.[0]?.lessons) && (
+                                  <p className="text-[10px] text-gray-500">
+                                    📚 {(m.lessons || m.topics[0].lessons).length} Lessons: {(m.lessons || m.topics[0].lessons).map((l: any) => l.title).join(', ')}
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Surveys Preview */}
+                        {(msg.updatedDraft.sections || msg.updatedDraft.questions) && (
+                          <div className="bg-white p-2 rounded-lg border border-indigo-100/90 text-[11px] text-gray-700">
+                            <span className="font-semibold text-gray-900">
+                              {(msg.updatedDraft.sections || msg.updatedDraft.questions).length} Survey Items Generated
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Training Profile Preview */}
+                        {msg.updatedDraft.scope && (
+                          <div className="bg-white p-2 rounded-lg border border-indigo-100/90 text-[11px] text-gray-700">
+                            <span className="font-semibold text-gray-900">Training Scope:</span>
+                            <p className="line-clamp-3 text-[10px] text-gray-600 mt-0.5">{msg.updatedDraft.scope}</p>
+                          </div>
+                        )}
+
+                        {/* Action footer */}
+                        <div className="pt-1.5 flex items-center justify-between border-t border-indigo-100">
+                          <span className="text-[10px] text-emerald-700 font-medium flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Applied to Canvas
+                          </span>
+                          {onApplyDraftToCanvas && (
+                            <button
+                              type="button"
+                              onClick={() => onApplyDraftToCanvas(backendTabName, msg.updatedDraft)}
+                              className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-semibold transition-colors shadow-2xs"
+                            >
+                              Re-sync Canvas
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

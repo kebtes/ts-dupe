@@ -7,9 +7,16 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface SurveyTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  suggestedDraft?: any;
+  onDismissDraft?: () => void;
 }
 
-export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
+export const SurveyTab: React.FC<SurveyTabProps> = ({
+  data,
+  onUpdateData,
+  suggestedDraft,
+  onDismissDraft,
+}) => {
   const [surveys, setSurveys] = useState(data.surveys || []);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newSurveyName, setNewSurveyName] = useState('');
@@ -21,6 +28,18 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Sync draft from Copilot
+  useEffect(() => {
+    if (suggestedDraft?.sections?.length || suggestedDraft?.questions?.length) {
+      setAiDraft({
+        status: 'success',
+        tab: 'survey',
+        data: suggestedDraft,
+        model: 'gemma4:31b-cloud',
+      });
+    }
+  }, [suggestedDraft]);
 
   // Check cached draft on mount
   useEffect(() => {
@@ -68,6 +87,7 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
         onUpdateData({ ...data, surveys: updated });
       }
       setAiDraft(null);
+      if (onDismissDraft) onDismissDraft();
       return;
     }
 
@@ -87,6 +107,7 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
         onUpdateData({ ...data, surveys: updated });
       }
       setAiDraft(null);
+      if (onDismissDraft) onDismissDraft();
     }
   };
 
@@ -158,7 +179,10 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData }) => {
           model={aiDraft.model || 'mimo-v2.6-flash'}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
-          onDismiss={() => setAiDraft(null)}
+          onDismiss={() => {
+            setAiDraft(null);
+            if (onDismissDraft) onDismissDraft();
+          }}
           onRegenerate={handleGenerate}
         >
           {aiDraft.data.sections ? (
