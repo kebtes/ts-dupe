@@ -66,7 +66,9 @@ export interface ContentDescriptionItem {
 }
 
 export interface ContentDescriptionDraftData {
-  contents: ContentDescriptionItem[];
+  title?: string;
+  description?: string;
+  contents?: ContentDescriptionItem[];
 }
 
 export interface SurveyQuestionItem {
@@ -238,12 +240,15 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
         tab,
         training_id: trainingId,
         company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
+        model: 'mimo-v2.6-flash',
         request_id: `req-${Date.now()}`,
         created_at: timestamp,
         updated_at: timestamp,
         warnings: [],
         data: {
+          title: 'Practical Hands-on Learning Guide',
+          description:
+            'A comprehensive module-focused resource designed to guide learners through key theoretical foundations, practical implementations, and real-world evaluation workflows.',
           contents: [
             {
               lesson_id: 'lesson-uuid-1',
