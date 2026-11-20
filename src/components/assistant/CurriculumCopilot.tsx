@@ -144,7 +144,7 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
         tab: backendTabName,
         user_message: text || undefined,
         selected_option_id: selectedOptionId || undefined,
-        current_draft: currentDraft,
+        current_draft: selectedOptionId ? undefined : currentDraft,
         conversation_history: history,
       });
 
