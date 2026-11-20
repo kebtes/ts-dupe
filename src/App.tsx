@@ -34,8 +34,23 @@ export function App() {
         lessons: m.lessons || [],
       }));
       setData((prev: any) => ({ ...prev, modules: converted }));
-    } else if (cleanTab === 'survey' && (updatedDraft.questions || updatedDraft.sections)) {
-      setData((prev: any) => ({ ...prev, surveys: updatedDraft.sections || updatedDraft.questions }));
+    } else if (cleanTab === 'survey' && (updatedDraft.sections || updatedDraft.questions)) {
+      const rawSections = updatedDraft.sections || (updatedDraft.questions ? [{ title: 'Learner Experience Feedback', questions: updatedDraft.questions }] : []);
+      const converted = rawSections.map((sec: any, idx: number) => ({
+        id: sec.id || `survey-sec-${idx}-${Date.now()}`,
+        name: sec.title || sec.name || `Section ${idx + 1}`,
+        title: sec.title || sec.name || `Section ${idx + 1}`,
+        type: sec.type || 'POST_TRAINING',
+        description: sec.description || `${sec.questions?.length || 0}-question feedback section covering ${sec.title || 'learner experience'}.`,
+        sectionCount: sec.questions?.length || 0,
+        questions: (sec.questions || []).map((q: any) => ({
+          prompt: q.prompt || q.question || q.title || 'Feedback question',
+          question: q.prompt || q.question || q.title || 'Feedback question',
+          type: q.type || 'MULTIPLE_CHOICE',
+          options: q.options || [],
+        })),
+      }));
+      setData((prev: any) => ({ ...prev, surveys: converted }));
     } else if (cleanTab === 'assessment' && updatedDraft.sections) {
       setData((prev: any) => ({ ...prev, assessments: updatedDraft.sections }));
     } else if (cleanTab === 'training-profile' && updatedDraft.scope) {
