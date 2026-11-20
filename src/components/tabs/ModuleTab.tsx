@@ -7,10 +7,25 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface ModuleTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  onOpenCopilot?: () => void;
+  suggestedDraft?: any;
+  onDismissDraft?: () => void;
 }
 
-export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
+export const ModuleTab: React.FC<ModuleTabProps> = ({
+  data,
+  onUpdateData,
+  onOpenCopilot,
+  suggestedDraft,
+  onDismissDraft,
+}) => {
   const [modules, setModules] = useState(data.modules || []);
+
+  useEffect(() => {
+    if (data.modules) {
+      setModules(data.modules);
+    }
+  }, [data.modules]);
   const [openModuleId, setOpenModuleId] = useState<string | null>(modules[0]?.id || null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newModuleName, setNewModuleName] = useState('');
@@ -21,6 +36,18 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Listen to Copilot or parent suggested drafts
+  useEffect(() => {
+    if (suggestedDraft?.modules?.length) {
+      setAiDraft({
+        status: 'success',
+        tab: 'module',
+        data: suggestedDraft,
+        model: 'gemma4:31b-cloud',
+      });
+    }
+  }, [suggestedDraft]);
 
   // Check cached draft on mount
   useEffect(() => {
@@ -56,24 +83,26 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
 
   const handleApplyDraft = () => {
     if (aiDraft?.data?.modules) {
-      const converted = aiDraft.data.modules.map((m, idx) => ({
+      const converted = aiDraft.data.modules.map((m: any, idx: number) => ({
         id: m.id || `mod-ai-${idx}-${Date.now()}`,
-        name: m.title,
+        name: m.title || m.name,
+        title: m.title || m.name,
         description: m.description,
         trainingTag: { name: 'AI Suggested' },
         practical_assignment: m.practical_assignment,
-        topics: m.topics,
+        topics: m.topics || (m.lessons ? [{ title: 'Core Lessons & Topics', order: 1, lessons: m.lessons }] : []),
+        lessons: m.lessons || [],
       }));
 
-      const updatedList = [...modules, ...converted];
-      setModules(updatedList);
+      setModules(converted);
       if (onUpdateData) {
         onUpdateData({
           ...data,
-          modules: updatedList,
+          modules: converted,
         });
       }
       setAiDraft(null);
+      if (onDismissDraft) onDismissDraft();
       if (converted[0]?.id) setOpenModuleId(converted[0].id);
     }
   };
@@ -109,9 +138,15 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
-          {/* AI Generator Button */}
+          {/* AI Copilot Button */}
           <button
-            onClick={handleGenerate}
+            onClick={() => {
+              if (onOpenCopilot) {
+                onOpenCopilot();
+              } else {
+                handleGenerate();
+              }
+            }}
             disabled={isGenerating}
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
           >
@@ -120,7 +155,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Suggest Modules with AI'}</span>
+            <span>{isGenerating ? 'Generating...' : 'Generate with Copilot'}</span>
           </button>
 
           {/* Manual Add Button */}
@@ -146,7 +181,10 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
           model={aiDraft.model || 'gemma4:31b-cloud'}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
-          onDismiss={() => setAiDraft(null)}
+          onDismiss={() => {
+            setAiDraft(null);
+            if (onDismissDraft) onDismissDraft();
+          }}
           onRegenerate={handleGenerate}
         >
           <div className="space-y-4">
@@ -154,12 +192,12 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
               The AI model generated {aiDraft.data.modules.length} recommended modules with topics and practical lab assignments:
             </p>
             <div className="space-y-3">
-              {aiDraft.data.modules.map((m, idx) => (
+              {aiDraft.data.modules.map((m: any, idx: number) => (
                 <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
                   <div className="flex items-center justify-between">
-                    <h5 className="font-bold text-gray-900 text-sm">{m.title}</h5>
+                    <h5 className="font-bold text-gray-900 text-sm">{m.title || m.name}</h5>
                     <span className="text-[11px] font-medium bg-blue-100 text-blue-700 px-2 py-0.5 rounded">
-                      Order {m.order}
+                      Order {m.order || idx + 1}
                     </span>
                   </div>
                   <p className="text-xs text-gray-600">{m.description}</p>
@@ -178,10 +216,12 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
                   )}
 
                   {/* Lessons */}
-                  {m.topics?.[0]?.lessons && (
+                  {((m.lessons && m.lessons.length > 0) || m.topics?.[0]?.lessons) && (
                     <div className="pt-1 text-xs text-gray-600">
                       <span className="font-medium text-gray-700">Topics & Lessons: </span>
-                      {m.topics[0].lessons.map((l) => `${l.title} (${l.duration}m)`).join(', ')}
+                      {(m.lessons || m.topics[0].lessons)
+                        .map((l: any) => `${l.title} (${l.duration}m)`)
+                        .join(', ')}
                     </div>
                   )}
                 </div>
@@ -269,27 +309,51 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
                     )}
 
                     {/* Topics / Lessons if present */}
-                    {mod.topics && mod.topics.length > 0 && (
+                    {((mod.lessons && mod.lessons.length > 0) || (mod.topics && mod.topics.length > 0)) && (
                       <div className="space-y-2 pt-2 border-t border-gray-100">
                         <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                          Structured Topics & Lessons
+                          Structured Lessons & Topics
                         </h5>
-                        <div className="space-y-2">
-                          {mod.topics.map((t: any, ti: number) => (
-                            <div key={ti} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
-                              <span className="font-bold text-gray-900">{t.title}</span>
-                              {t.lessons && (
-                                <ul className="list-disc list-inside mt-1 text-gray-600 space-y-0.5">
-                                  {t.lessons.map((l: any, li: number) => (
-                                    <li key={li}>
-                                      {l.title} &mdash; {l.objective} ({l.duration} {l.duration_type?.toLowerCase()})
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          ))}
-                        </div>
+                        {mod.lessons && mod.lessons.length > 0 && (
+                          <div className="p-3 bg-gray-50 rounded-lg border border-gray-200 text-xs">
+                            <ul className="space-y-2">
+                              {mod.lessons.map((l: any, li: number) => (
+                                <li key={li} className="flex items-start gap-2">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mt-1.5 shrink-0" />
+                                  <div>
+                                    <span className="font-semibold text-gray-900">{l.title}</span>
+                                    {l.duration && (
+                                      <span className="ml-1 text-[11px] text-gray-500">
+                                        ({l.duration} {l.duration_type?.toLowerCase() || 'min'})
+                                      </span>
+                                    )}
+                                    {l.objective && (
+                                      <p className="text-gray-600 mt-0.5">{l.objective}</p>
+                                    )}
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {mod.topics && mod.topics.length > 0 && !mod.lessons && (
+                          <div className="space-y-2">
+                            {mod.topics.map((t: any, ti: number) => (
+                              <div key={ti} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
+                                <span className="font-bold text-gray-900">{t.title}</span>
+                                {t.lessons && (
+                                  <ul className="list-disc list-inside mt-1 text-gray-600 space-y-0.5">
+                                    {t.lessons.map((l: any, li: number) => (
+                                      <li key={li}>
+                                        {l.title} &mdash; {l.objective} ({l.duration} {l.duration_type?.toLowerCase()})
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 

@@ -8,9 +8,16 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface TrainingProfileTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  suggestedDraft?: any;
+  onDismissDraft?: () => void;
 }
 
-export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, onUpdateData }) => {
+export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({
+  data,
+  onUpdateData,
+  suggestedDraft,
+  onDismissDraft,
+}) => {
   const { trainingProfile, objectives, training } = data as any;
   const trainingId = training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
 
@@ -22,6 +29,18 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<TrainingProfileDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Sync draft from Copilot
+  useEffect(() => {
+    if (suggestedDraft?.scope) {
+      setAiDraft({
+        status: 'success',
+        tab: 'training-profile',
+        data: suggestedDraft,
+        model: 'gemma4:31b-cloud',
+      });
+    }
+  }, [suggestedDraft]);
 
   // Check for cached draft on mount
   useEffect(() => {
@@ -58,6 +77,7 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
         });
       }
       setAiDraft(null);
+      if (onDismissDraft) onDismissDraft();
     }
   };
 
@@ -98,7 +118,10 @@ export const TrainingProfileTab: React.FC<TrainingProfileTabProps> = ({ data, on
           model={aiDraft.model || 'gemma4:31b-cloud'}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
-          onDismiss={() => setAiDraft(null)}
+          onDismiss={() => {
+            setAiDraft(null);
+            if (onDismissDraft) onDismissDraft();
+          }}
           onRegenerate={handleGenerate}
         >
           <div className="space-y-2">

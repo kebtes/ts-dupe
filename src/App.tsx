@@ -10,26 +10,100 @@ import { ModuleTab } from './components/tabs/ModuleTab';
 import { SurveyTab } from './components/tabs/SurveyTab';
 import { AssessmentTab } from './components/tabs/AssessmentTab';
 import { ContentTab } from './components/tabs/ContentTab';
-import { ElevenLabsWidget } from './components/assistant/ElevenLabsWidget';
+import { CurriculumCopilot } from './components/assistant/CurriculumCopilot';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [data, setData] = useState(MOCK_TRAINING_DATA as any);
+  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+  const [suggestedDrafts, setSuggestedDrafts] = useState<Record<string, any>>({});
+
+  const handleApplyDraftToCanvas = (tab: string, updatedDraft: any) => {
+    const cleanTab = tab.replace('_', '-');
+    setSuggestedDrafts((prev) => ({ ...prev, [cleanTab]: updatedDraft }));
+
+    if (cleanTab === 'module' && updatedDraft.modules) {
+      const converted = updatedDraft.modules.map((m: any, idx: number) => ({
+        id: m.id || `mod-ai-${idx}-${Date.now()}`,
+        name: m.title || m.name,
+        title: m.title || m.name,
+        description: m.description,
+        trainingTag: { name: 'AI Suggested' },
+        practical_assignment: m.practical_assignment,
+        topics: m.topics || (m.lessons ? [{ title: 'Core Lessons & Topics', order: 1, lessons: m.lessons }] : []),
+        lessons: m.lessons || [],
+      }));
+      setData((prev: any) => ({ ...prev, modules: converted }));
+    } else if (cleanTab === 'survey' && (updatedDraft.sections || updatedDraft.questions)) {
+      const rawSections = updatedDraft.sections || (updatedDraft.questions ? [{ title: 'Learner Experience Feedback', questions: updatedDraft.questions }] : []);
+      const converted = rawSections.map((sec: any, idx: number) => ({
+        id: sec.id || `survey-sec-${idx}-${Date.now()}`,
+        name: sec.title || sec.name || `Section ${idx + 1}`,
+        title: sec.title || sec.name || `Section ${idx + 1}`,
+        type: sec.type || 'POST_TRAINING',
+        description: sec.description || `${sec.questions?.length || 0}-question feedback section covering ${sec.title || 'learner experience'}.`,
+        sectionCount: sec.questions?.length || 0,
+        questions: (sec.questions || []).map((q: any) => ({
+          prompt: q.prompt || q.question || q.title || 'Feedback question',
+          question: q.prompt || q.question || q.title || 'Feedback question',
+          type: q.type || 'MULTIPLE_CHOICE',
+          options: q.options || [],
+        })),
+      }));
+      setData((prev: any) => ({ ...prev, surveys: converted }));
+    } else if (cleanTab === 'assessment' && updatedDraft.sections) {
+      setData((prev: any) => ({ ...prev, assessments: updatedDraft.sections }));
+    } else if (cleanTab === 'training-profile' && updatedDraft.scope) {
+      setData((prev: any) => ({
+        ...prev,
+        trainingProfile: { ...prev.trainingProfile, scope: updatedDraft.scope },
+      }));
+    }
+  };
 
   const renderTabContent = () => {
     switch (activeTab) {
       case 'overview':
         return <OverviewTab data={data} />;
       case 'training_profile':
-        return <TrainingProfileTab data={data} onUpdateData={setData} />;
+        return (
+          <TrainingProfileTab
+            data={data}
+            onUpdateData={setData}
+            suggestedDraft={suggestedDrafts['training-profile']}
+            onDismissDraft={() => setSuggestedDrafts((prev) => ({ ...prev, 'training-profile': null }))}
+          />
+        );
       case 'audience_profile':
         return <AudienceProfileTab data={data} />;
       case 'module':
-        return <ModuleTab data={data} onUpdateData={setData} />;
+        return (
+          <ModuleTab
+            data={data}
+            onUpdateData={setData}
+            onOpenCopilot={() => setIsCopilotOpen(true)}
+            suggestedDraft={suggestedDrafts['module']}
+            onDismissDraft={() => setSuggestedDrafts((prev) => ({ ...prev, module: null }))}
+          />
+        );
       case 'survey':
-        return <SurveyTab data={data} onUpdateData={setData} />;
+        return (
+          <SurveyTab
+            data={data}
+            onUpdateData={setData}
+            suggestedDraft={suggestedDrafts['survey']}
+            onDismissDraft={() => setSuggestedDrafts((prev) => ({ ...prev, survey: null }))}
+          />
+        );
       case 'assessment':
-        return <AssessmentTab data={data} onUpdateData={setData} />;
+        return (
+          <AssessmentTab
+            data={data}
+            onUpdateData={setData}
+            suggestedDraft={suggestedDrafts['assessment']}
+            onDismissDraft={() => setSuggestedDrafts((prev) => ({ ...prev, assessment: null }))}
+          />
+        );
       case 'content':
         return <ContentTab data={data} onUpdateData={setData} />;
       default:
@@ -57,8 +131,14 @@ export function App() {
         </main>
       </div>
 
-      {/* ElevenLabs Conversational AI RAG Assistant (Bottom Right) */}
-      <ElevenLabsWidget />
+      {/* Interactive Curriculum Designer Copilot Drawer & Trigger */}
+      <CurriculumCopilot
+        activeTab={activeTab}
+        trainingData={data}
+        isOpen={isCopilotOpen}
+        onToggleOpen={setIsCopilotOpen}
+        onApplyDraftToCanvas={handleApplyDraftToCanvas}
+      />
     </div>
   );
 }

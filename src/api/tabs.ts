@@ -1,13 +1,16 @@
 // src/api/tabs.ts
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000';
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8002';
+const COMPANY_ID = (import.meta as any).env?.VITE_COMPANY_ID || '816e9eab-f109-4de2-b7aa-154f8cb2ac67';
+const USER_ROLE = (import.meta as any).env?.VITE_USER_ROLE || 'admin';
+const USER_ID = (import.meta as any).env?.VITE_USER_ID || 'designer-1';
 
 const DEFAULT_HEADERS = {
   'Content-Type': 'application/json',
   'Authorization': 'Bearer dev-token',
-  'X-TSP-User-ID': 'designer-1',
-  'X-TSP-Company-ID': 'co-1',
-  'X-TSP-Role': 'designer',
+  'X-TSP-User-ID': USER_ID,
+  'X-TSP-Company-ID': COMPANY_ID,
+  'X-TSP-Role': USER_ROLE,
 };
 
 export type TabName =
@@ -63,33 +66,54 @@ export interface ContentDescriptionItem {
 }
 
 export interface ContentDescriptionDraftData {
-  contents: ContentDescriptionItem[];
+  title?: string;
+  description?: string;
+  contents?: ContentDescriptionItem[];
 }
 
-export interface SurveyQuestion {
-  question: string;
+export interface SurveyQuestionItem {
+  prompt?: string;
+  question?: string;
   type: string;
-  order: number;
+  order?: number;
+  options?: string[];
+}
+
+export interface SurveySectionItem {
+  title: string;
+  questions: SurveyQuestionItem[];
 }
 
 export interface SurveyDraftData {
-  questions: SurveyQuestion[];
+  questions?: SurveyQuestionItem[];
+  sections?: SurveySectionItem[];
 }
 
 export interface AssessmentOption {
-  text: string;
-  is_correct: boolean;
-  rationale: string;
+  text?: string;
+  is_correct?: boolean;
+  rationale?: string;
 }
 
-export interface AssessmentQuestion {
-  lesson_id: string;
-  question: string;
-  options: AssessmentOption[];
+export interface AssessmentQuestionItem {
+  lesson_id?: string;
+  prompt?: string;
+  question?: string;
+  type?: string;
+  weight?: number;
+  options?: (AssessmentOption | string)[];
+  correct_answer?: string;
+  rubric?: any;
+}
+
+export interface AssessmentSectionItem {
+  title: string;
+  questions: AssessmentQuestionItem[];
 }
 
 export interface AssessmentDraftData {
-  questions: AssessmentQuestion[];
+  questions?: AssessmentQuestionItem[];
+  sections?: AssessmentSectionItem[];
   uncovered_lessons?: string[];
 }
 
@@ -216,12 +240,15 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
         tab,
         training_id: trainingId,
         company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
+        model: 'mimo-v2.6-flash',
         request_id: `req-${Date.now()}`,
         created_at: timestamp,
         updated_at: timestamp,
         warnings: [],
         data: {
+          title: 'Practical Hands-on Learning Guide',
+          description:
+            'A comprehensive module-focused resource designed to guide learners through key theoretical foundations, practical implementations, and real-world evaluation workflows.',
           contents: [
             {
               lesson_id: 'lesson-uuid-1',
@@ -358,21 +385,41 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
  */
 export async function generateTabDraft<T = any>(
   tab: TabName,
-  trainingId: string,
-  target?: { target_type: string; target_id: string }
+  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd',
+  target?: {
+    kind?: string;
+    id?: string;
+    target_type?: string;
+    target_id?: string;
+    title?: string;
+    name?: string;
+    description?: string;
+  }
 ): Promise<TabDraftResponse<T>> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    // Allow up to 120 seconds for backend LLM generation
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+    const payload: Record<string, any> = {
+      training_id: finalTrainingId,
+    };
+    if (target && ((target as any).kind || (target as any).target_type)) {
+      payload.target = {
+        kind: (target as any).kind || (target as any).target_type,
+        id: (target as any).id || (target as any).target_id,
+        title: (target as any).title,
+        name: (target as any).name,
+        description: (target as any).description,
+      };
+    }
 
     const response = await fetch(`${API_BASE}/v1/training-tabs/${tab}`, {
       method: 'POST',
       headers: DEFAULT_HEADERS,
       signal: controller.signal,
-      body: JSON.stringify({
-        training_id: trainingId,
-        target: target ?? null,
-      }),
+      body: JSON.stringify(payload),
     });
 
     clearTimeout(timeoutId);
@@ -380,6 +427,7 @@ export async function generateTabDraft<T = any>(
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       const message =
+        errorData.message ||
         errorData.detail?.message ||
         errorData.detail ||
         (response.status === 422 || response.status === 400
@@ -421,14 +469,15 @@ export async function generateTabDraft<T = any>(
  */
 export async function getCachedDraft<T = any>(
   tab: TabName,
-  trainingId: string
+  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd'
 ): Promise<TabDraftResponse<T> | null> {
+  const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     const response = await fetch(
-      `${API_BASE}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(trainingId)}`,
+      `${API_BASE}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(finalTrainingId)}`,
       {
         method: 'GET',
         headers: DEFAULT_HEADERS,
@@ -439,17 +488,151 @@ export async function getCachedDraft<T = any>(
     clearTimeout(timeoutId);
 
     if (response.status === 404) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
     }
 
     if (!response.ok) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
     }
 
     const result = await response.json();
-    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = result;
+    LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] = result;
     return result;
   } catch (err) {
-    return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+    return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
   }
 }
+
+export interface CopilotChoiceOption {
+  id: string;
+  label: string;
+  description?: string;
+  is_recommended?: boolean;
+}
+
+export interface CopilotClarification {
+  question: string;
+  options: CopilotChoiceOption[];
+  allow_custom?: boolean;
+}
+
+export interface DesignerCopilotRequest {
+  training_id: string;
+  tab: string;
+  user_message?: string;
+  selected_option_id?: string;
+  current_draft?: any;
+  conversation_history?: Array<{ role: string; content: string }>;
+}
+
+export interface DesignerCopilotResponse {
+  status: string;
+  response_type: 'CLARIFICATION' | 'UPDATE_DRAFT' | 'CHAT';
+  message: string;
+  clarification?: CopilotClarification;
+  updated_draft?: any;
+  model?: string;
+}
+
+/**
+ * Send an interactive turn to the Curriculum Designer Copilot
+ */
+export async function sendDesignerCopilotTurn(
+  req: DesignerCopilotRequest
+): Promise<DesignerCopilotResponse> {
+  const finalTrainingId = req.training_id?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    const response = await fetch(`${API_BASE}/v1/training-tabs/copilot`, {
+      method: 'POST',
+      headers: DEFAULT_HEADERS,
+      signal: controller.signal,
+      body: JSON.stringify({
+        ...req,
+        training_id: finalTrainingId,
+      }),
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const message =
+        errorData.message ||
+        errorData.detail?.message ||
+        errorData.detail ||
+        `Copilot turn failed: ${response.status}`;
+      throw new Error(message);
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    // If backend is offline or network fails, provide client fallback
+    if (
+      err.name === 'AbortError' ||
+      err.message?.includes('Failed to fetch') ||
+      err.message?.includes('NetworkError') ||
+      err.message?.includes('Could not connect')
+    ) {
+      console.warn(`[Copilot API] Backend offline. Using client copilot fallback.`);
+      await new Promise((r) => setTimeout(r, 600));
+
+      if (req.selected_option_id) {
+        const mockTab = (req.tab === 'module' ? 'module' : req.tab) as TabName;
+        const mockDraft = getMockDraft(mockTab, finalTrainingId);
+        return {
+          status: 'success',
+          response_type: 'UPDATE_DRAFT',
+          message: `I've synthesized the initial draft for **${req.tab}** using your selected option. It has been applied to the canvas.`,
+          updated_draft: mockDraft.data,
+          model: 'mimo-v2.6-flash',
+        };
+      }
+
+      if (req.user_message && req.current_draft) {
+        return {
+          status: 'success',
+          response_type: 'UPDATE_DRAFT',
+          message: `I've updated the draft according to your feedback: "${req.user_message}". Changes are now active on the canvas.`,
+          updated_draft: req.current_draft,
+          model: 'mimo-v2.6-flash',
+        };
+      }
+
+      return {
+        status: 'success',
+        response_type: 'CLARIFICATION',
+        message: `I'm ready to assist with the **${req.tab}** section. Let's align on structure before generating:`,
+        clarification: {
+          question: `How would you like to structure the ${req.tab} section?`,
+          options: [
+            {
+              id: 'opt_mod_5',
+              label: '5 Modules (Recommended)',
+              description: 'Standard 8-week duration breakdown across core AI topics and projects.',
+              is_recommended: true,
+            },
+            {
+              id: 'opt_mod_3',
+              label: '3 Modules (Intensive)',
+              description: 'Fast-track foundations with larger consolidated milestones.',
+              is_recommended: false,
+            },
+            {
+              id: 'opt_mod_6',
+              label: '6 Modules (Weekly Sprints)',
+              description: 'Weekly sprint breakdown with continuous lab milestones.',
+              is_recommended: false,
+            },
+          ],
+          allow_custom: true,
+        },
+        model: 'mimo-v2.6-flash',
+      };
+    }
+    throw err;
+  }
+}
+
