@@ -149,21 +149,41 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
         conversation_history: history,
       });
 
+      let displayMessage = response.message || '';
+      let draftToApply = response.updated_draft;
+      let isDraftUpdated = response.response_type === 'UPDATE_DRAFT' && Boolean(response.updated_draft);
+
+      // Defensive client unwrapping if backend ever returns raw JSON string in message
+      if (typeof displayMessage === 'string' && displayMessage.trim().startsWith('{')) {
+        try {
+          const rawParsed = JSON.parse(displayMessage.trim());
+          if (rawParsed.message) {
+            displayMessage = rawParsed.message;
+          }
+          if (rawParsed.updated_draft) {
+            draftToApply = rawParsed.updated_draft;
+            isDraftUpdated = true;
+          }
+        } catch {
+          // If not valid JSON, leave as is
+        }
+      }
+
       const assistantMsg: ChatMessage = {
         id: `ai-${Date.now()}`,
         sender: 'assistant',
-        text: response.message,
+        text: displayMessage,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         clarification: response.clarification,
-        isDraftUpdated: response.response_type === 'UPDATE_DRAFT' && Boolean(response.updated_draft),
-        updatedDraft: response.updated_draft,
+        isDraftUpdated,
+        updatedDraft: draftToApply,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
 
       // If draft was updated by Copilot, apply directly to canvas!
-      if (response.response_type === 'UPDATE_DRAFT' && response.updated_draft && onApplyDraftToCanvas) {
-        onApplyDraftToCanvas(backendTabName, response.updated_draft);
+      if (isDraftUpdated && draftToApply && onApplyDraftToCanvas) {
+        onApplyDraftToCanvas(backendTabName, draftToApply);
       }
     } catch (err: any) {
       setMessages((prev) => [
