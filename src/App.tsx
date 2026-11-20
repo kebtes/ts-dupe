@@ -10,11 +10,36 @@ import { ModuleTab } from './components/tabs/ModuleTab';
 import { SurveyTab } from './components/tabs/SurveyTab';
 import { AssessmentTab } from './components/tabs/AssessmentTab';
 import { ContentTab } from './components/tabs/ContentTab';
-import { ElevenLabsWidget } from './components/assistant/ElevenLabsWidget';
+import { CurriculumCopilot } from './components/assistant/CurriculumCopilot';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [data, setData] = useState(MOCK_TRAINING_DATA as any);
+  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+
+  const handleApplyDraftToCanvas = (tab: string, updatedDraft: any) => {
+    const cleanTab = tab.replace('_', '-');
+    if (cleanTab === 'module' && updatedDraft.modules) {
+      const converted = updatedDraft.modules.map((m: any, idx: number) => ({
+        id: m.id || `mod-ai-${idx}-${Date.now()}`,
+        name: m.title,
+        description: m.description,
+        trainingTag: { name: 'AI Suggested' },
+        practical_assignment: m.practical_assignment,
+        topics: m.topics,
+      }));
+      setData((prev: any) => ({ ...prev, modules: converted }));
+    } else if (cleanTab === 'survey' && (updatedDraft.questions || updatedDraft.sections)) {
+      setData((prev: any) => ({ ...prev, surveys: updatedDraft.sections || updatedDraft.questions }));
+    } else if (cleanTab === 'assessment' && updatedDraft.sections) {
+      setData((prev: any) => ({ ...prev, assessments: updatedDraft.sections }));
+    } else if (cleanTab === 'training-profile' && updatedDraft.scope) {
+      setData((prev: any) => ({
+        ...prev,
+        trainingProfile: { ...prev.trainingProfile, scope: updatedDraft.scope },
+      }));
+    }
+  };
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -25,7 +50,13 @@ export function App() {
       case 'audience_profile':
         return <AudienceProfileTab data={data} />;
       case 'module':
-        return <ModuleTab data={data} onUpdateData={setData} />;
+        return (
+          <ModuleTab
+            data={data}
+            onUpdateData={setData}
+            onOpenCopilot={() => setIsCopilotOpen(true)}
+          />
+        );
       case 'survey':
         return <SurveyTab data={data} onUpdateData={setData} />;
       case 'assessment':
@@ -57,8 +88,14 @@ export function App() {
         </main>
       </div>
 
-      {/* ElevenLabs Conversational AI RAG Assistant (Bottom Right) */}
-      <ElevenLabsWidget />
+      {/* Interactive Curriculum Designer Copilot Drawer & Trigger */}
+      <CurriculumCopilot
+        activeTab={activeTab}
+        trainingData={data}
+        isOpen={isCopilotOpen}
+        onToggleOpen={setIsCopilotOpen}
+        onApplyDraftToCanvas={handleApplyDraftToCanvas}
+      />
     </div>
   );
 }

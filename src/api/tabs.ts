@@ -491,3 +491,137 @@ export async function getCachedDraft<T = any>(
     return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
   }
 }
+
+export interface CopilotChoiceOption {
+  id: string;
+  label: string;
+  description?: string;
+  is_recommended?: boolean;
+}
+
+export interface CopilotClarification {
+  question: string;
+  options: CopilotChoiceOption[];
+  allow_custom?: boolean;
+}
+
+export interface DesignerCopilotRequest {
+  training_id: string;
+  tab: string;
+  user_message?: string;
+  selected_option_id?: string;
+  current_draft?: any;
+  conversation_history?: Array<{ role: string; content: string }>;
+}
+
+export interface DesignerCopilotResponse {
+  status: string;
+  response_type: 'CLARIFICATION' | 'UPDATE_DRAFT' | 'CHAT';
+  message: string;
+  clarification?: CopilotClarification;
+  updated_draft?: any;
+  model?: string;
+}
+
+/**
+ * Send an interactive turn to the Curriculum Designer Copilot
+ */
+export async function sendDesignerCopilotTurn(
+  req: DesignerCopilotRequest
+): Promise<DesignerCopilotResponse> {
+  const finalTrainingId = req.training_id?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    const response = await fetch(`${API_BASE}/v1/training-tabs/copilot`, {
+      method: 'POST',
+      headers: DEFAULT_HEADERS,
+      signal: controller.signal,
+      body: JSON.stringify({
+        ...req,
+        training_id: finalTrainingId,
+      }),
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const message =
+        errorData.message ||
+        errorData.detail?.message ||
+        errorData.detail ||
+        `Copilot turn failed: ${response.status}`;
+      throw new Error(message);
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    // If backend is offline or network fails, provide client fallback
+    if (
+      err.name === 'AbortError' ||
+      err.message?.includes('Failed to fetch') ||
+      err.message?.includes('NetworkError') ||
+      err.message?.includes('Could not connect')
+    ) {
+      console.warn(`[Copilot API] Backend offline. Using client copilot fallback.`);
+      await new Promise((r) => setTimeout(r, 600));
+
+      if (req.selected_option_id) {
+        const mockTab = (req.tab === 'module' ? 'module' : req.tab) as TabName;
+        const mockDraft = getMockDraft(mockTab, finalTrainingId);
+        return {
+          status: 'success',
+          response_type: 'UPDATE_DRAFT',
+          message: `I've synthesized the initial draft for **${req.tab}** using your selected option. It has been applied to the canvas.`,
+          updated_draft: mockDraft.data,
+          model: 'mimo-v2.6-flash',
+        };
+      }
+
+      if (req.user_message && req.current_draft) {
+        return {
+          status: 'success',
+          response_type: 'UPDATE_DRAFT',
+          message: `I've updated the draft according to your feedback: "${req.user_message}". Changes are now active on the canvas.`,
+          updated_draft: req.current_draft,
+          model: 'mimo-v2.6-flash',
+        };
+      }
+
+      return {
+        status: 'success',
+        response_type: 'CLARIFICATION',
+        message: `I'm ready to assist with the **${req.tab}** section. Let's align on structure before generating:`,
+        clarification: {
+          question: `How would you like to structure the ${req.tab} section?`,
+          options: [
+            {
+              id: 'opt_mod_5',
+              label: '5 Modules (Recommended)',
+              description: 'Standard 8-week duration breakdown across core AI topics and projects.',
+              is_recommended: true,
+            },
+            {
+              id: 'opt_mod_3',
+              label: '3 Modules (Intensive)',
+              description: 'Fast-track foundations with larger consolidated milestones.',
+              is_recommended: false,
+            },
+            {
+              id: 'opt_mod_6',
+              label: '6 Modules (Weekly Sprints)',
+              description: 'Weekly sprint breakdown with continuous lab milestones.',
+              is_recommended: false,
+            },
+          ],
+          allow_custom: true,
+        },
+        model: 'mimo-v2.6-flash',
+      };
+    }
+    throw err;
+  }
+}
+

@@ -7,10 +7,17 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface ModuleTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  onOpenCopilot?: () => void;
 }
 
-export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
+export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData, onOpenCopilot }) => {
   const [modules, setModules] = useState(data.modules || []);
+
+  useEffect(() => {
+    if (data.modules) {
+      setModules(data.modules);
+    }
+  }, [data.modules]);
   const [openModuleId, setOpenModuleId] = useState<string | null>(modules[0]?.id || null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newModuleName, setNewModuleName] = useState('');
@@ -109,9 +116,15 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
-          {/* AI Generator Button */}
+          {/* AI Copilot Button */}
           <button
-            onClick={handleGenerate}
+            onClick={() => {
+              if (onOpenCopilot) {
+                onOpenCopilot();
+              } else {
+                handleGenerate();
+              }
+            }}
             disabled={isGenerating}
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
           >
@@ -120,7 +133,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData }) => {
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Suggest Modules with AI'}</span>
+            <span>{isGenerating ? 'Generating...' : 'Generate with Copilot'}</span>
           </button>
 
           {/* Manual Add Button */}
