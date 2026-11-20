@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TrainingData } from '../../types';
 import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw } from 'lucide-react';
 import { generateTabDraft, ContentDescriptionDraftData } from '../../api/tabs';
@@ -16,15 +16,23 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newType, setNewType] = useState('PDF');
-  const [newModule, setNewModule] = useState(
-    data.modules?.[0]?.name || 'Phase One Final Research'
+  const [selectedModuleId, setSelectedModuleId] = useState<string>(
+    data.modules?.[0]?.id || data.modules?.[0]?.name || ''
   );
 
   const [isModalGenerating, setIsModalGenerating] = useState(false);
   const [modalAiError, setModalAiError] = useState<string | null>(null);
   const [hasAiSuggested, setHasAiSuggested] = useState(false);
+  const activeRequestRef = useRef<number>(0);
 
   const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+  // Keep selectedModuleId synced if data.modules initializes later
+  useEffect(() => {
+    if (data.modules?.length && !selectedModuleId) {
+      setSelectedModuleId(data.modules[0].id || data.modules[0].name || '');
+    }
+  }, [data.modules, selectedModuleId]);
 
   const modulesList = Array.from(
     new Set((data.contents || []).map((c) => c.moduleName).filter(Boolean))
@@ -42,32 +50,55 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
     return matchesSearch && matchesModule;
   });
 
-  const fetchModuleSuggestion = async (modName: string) => {
-    const targetMod: any = data.modules?.find(
-      (m: any) => m.name === modName || m.id === modName || m.title === modName
-    ) || data.modules?.[0];
+  const getTargetModule = (targetId: string) => {
+    if (!data.modules?.length) return null;
+    return (
+      data.modules.find(
+        (m: any) =>
+          String(m.id) === String(targetId) ||
+          m.name === targetId ||
+          m.title === targetId
+      ) || data.modules[0]
+    );
+  };
 
+  const fetchModuleSuggestion = async (targetId: string) => {
+    const targetMod = getTargetModule(targetId);
     if (!targetMod) return;
 
+    const requestId = ++activeRequestRef.current;
     setIsModalGenerating(true);
     setModalAiError(null);
+    setHasAiSuggested(false);
+    // Clear previous inputs so the user sees fresh generation for the selected module
+    setNewName('');
+    setNewDesc('');
+
     try {
+      const modId = targetMod.id || `mod-${Date.now()}`;
+      const modTitle = targetMod.title || targetMod.name || 'Module';
+      const modDesc = targetMod.description || '';
+
       const response = await generateTabDraft<ContentDescriptionDraftData>(
         'content-description',
         trainingId,
         {
           kind: 'module',
-          id: targetMod.id,
-          title: targetMod.title || targetMod.name,
-          name: targetMod.name || targetMod.title,
-          description: targetMod.description,
+          id: modId,
+          title: modTitle,
+          name: modTitle,
+          description: modDesc,
         }
       );
+
+      // Discard stale out-of-order response if user picked another module
+      if (activeRequestRef.current !== requestId) return;
+
       if (response && response.data) {
         if (response.data.title) {
           setNewName(response.data.title);
         } else {
-          setNewName(`${targetMod.name || targetMod.title} Resource Guide`);
+          setNewName(`${modTitle} Resource Guide`);
         }
         if (response.data.description) {
           setNewDesc(response.data.description);
@@ -75,28 +106,58 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         setHasAiSuggested(true);
       }
     } catch (err: any) {
+      if (activeRequestRef.current !== requestId) return;
       setModalAiError(err.message || 'AI suggestion failed. You can type manually.');
     } finally {
-      setIsModalGenerating(false);
+      if (activeRequestRef.current === requestId) {
+        setIsModalGenerating(false);
+      }
     }
   };
 
-  // When modal opens, auto-suggest for selected module if inputs are empty
-  useEffect(() => {
-    if (isAddOpen && !newName.trim() && !newDesc.trim() && data.modules?.length) {
-      fetchModuleSuggestion(newModule);
+  const handleOpenAddModal = () => {
+    let target = data.modules?.[0];
+    if (selectedModule !== 'ALL') {
+      const matched = data.modules?.find(
+        (m: any) =>
+          m.name === selectedModule ||
+          m.title === selectedModule ||
+          String(m.id) === String(selectedModule)
+      );
+      if (matched) target = matched;
     }
-  }, [isAddOpen]);
+    const chosenId = target?.id || target?.name || target?.title || '';
+    setSelectedModuleId(chosenId);
+    setNewName('');
+    setNewDesc('');
+    setHasAiSuggested(false);
+    setModalAiError(null);
+    setIsAddOpen(true);
+    if (chosenId) {
+      fetchModuleSuggestion(chosenId);
+    }
+  };
+
+  const handleCloseAddModal = () => {
+    activeRequestRef.current++;
+    setIsModalGenerating(false);
+    setModalAiError(null);
+    setIsAddOpen(false);
+  };
 
   const handleModuleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const selected = e.target.value;
-    setNewModule(selected);
+    setSelectedModuleId(selected);
     fetchModuleSuggestion(selected);
   };
 
   const handleAddContent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
+
+    const targetMod = getTargetModule(selectedModuleId);
+    const modDisplayName = targetMod?.name || targetMod?.title || 'General';
+
     const newContent = {
       id: `content-${Date.now()}`,
       name: newName,
@@ -104,7 +165,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
       contentLevel: 'MODULE',
       contentFileType: newType,
       contentStatus: 'PENDING',
-      moduleName: newModule,
+      moduleName: modDisplayName,
       contentDeveloper: {
         email: 'developer@gheero.et',
         role: { name: 'ROLE_CONTENT_DEVELOPER', colorCode: '#Content Developer' },
@@ -135,9 +196,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         <div className="flex items-center gap-2 self-start md:self-auto">
           {/* Manual Add Button */}
           <button
-            onClick={() => {
-              setIsAddOpen(true);
-            }}
+            onClick={handleOpenAddModal}
             className="bg-brand text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
           >
             <Plus className="w-4 h-4" />
@@ -259,10 +318,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
                 </p>
               </div>
               <button
-                onClick={() => {
-                  setIsAddOpen(false);
-                  setModalAiError(null);
-                }}
+                onClick={handleCloseAddModal}
                 className="text-gray-400 hover:text-gray-600 text-xl font-bold"
               >
                 &times;
@@ -278,7 +334,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
                   </label>
                   <button
                     type="button"
-                    onClick={() => fetchModuleSuggestion(newModule)}
+                    onClick={() => fetchModuleSuggestion(selectedModuleId)}
                     disabled={isModalGenerating}
                     className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 disabled:opacity-50 transition-colors"
                   >
@@ -291,16 +347,20 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
                   </button>
                 </div>
                 <select
-                  value={newModule}
+                  value={selectedModuleId}
                   onChange={handleModuleChange}
                   disabled={isModalGenerating}
                   className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA] bg-white disabled:bg-gray-50"
                 >
-                  {data.modules?.map((m) => (
-                    <option key={m.id} value={m.name}>
-                      {m.name}
-                    </option>
-                  ))}
+                  {data.modules?.map((m) => {
+                    const val = m.id || m.name || m.title;
+                    const label = m.title || m.name;
+                    return (
+                      <option key={val} value={val}>
+                        {label}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
@@ -308,7 +368,15 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
               {isModalGenerating && (
                 <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center gap-2.5 text-xs text-indigo-700 animate-pulse">
                   <RefreshCw className="w-4 h-4 animate-spin text-indigo-600 shrink-0" />
-                  <span>AI is crafting a title and description for <strong>{newModule}</strong>...</span>
+                  <span>
+                    AI is crafting a title and description for{' '}
+                    <strong>
+                      {getTargetModule(selectedModuleId)?.title ||
+                       getTargetModule(selectedModuleId)?.name ||
+                       'selected module'}
+                    </strong>
+                    ...
+                  </span>
                 </div>
               )}
 
@@ -317,7 +385,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
                   <span>{modalAiError}</span>
                   <button
                     type="button"
-                    onClick={() => fetchModuleSuggestion(newModule)}
+                    onClick={() => fetchModuleSuggestion(selectedModuleId)}
                     className="underline font-semibold ml-2 text-red-700"
                   >
                     Retry
@@ -328,7 +396,15 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
               {hasAiSuggested && !isModalGenerating && (
                 <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-700 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>AI suggested title &amp; description applied for this module. You can edit them below.</span>
+                  <span>
+                    AI suggested title &amp; description applied for{' '}
+                    <strong>
+                      {getTargetModule(selectedModuleId)?.title ||
+                       getTargetModule(selectedModuleId)?.name ||
+                       'this module'}
+                    </strong>
+                    . You can edit them below.
+                  </span>
                 </div>
               )}
 
@@ -384,10 +460,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
               <div className="flex justify-end gap-3 pt-3 border-t">
                 <button
                   type="button"
-                  onClick={() => {
-                    setIsAddOpen(false);
-                    setModalAiError(null);
-                  }}
+                  onClick={handleCloseAddModal}
                   className="px-4 py-2 border rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
                 >
                   Cancel
