@@ -62,9 +62,13 @@ export interface TrainingData {
   modules: Array<{
     id: string;
     name: string;
+    title?: string;
     description: string;
     trainingTag?: any;
     days?: any[];
+    practical_assignment?: any;
+    topics?: any[];
+    lessons?: any[];
   }>;
   surveys: Array<{
     id: string;

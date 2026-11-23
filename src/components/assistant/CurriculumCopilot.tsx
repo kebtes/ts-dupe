@@ -39,6 +39,45 @@ interface CurriculumCopilotProps {
   onApplyDraftToCanvas?: (tab: string, updatedDraft: any) => void;
 }
 
+const TAB_QUICK_CHIPS: Record<string, string[]> = {
+  module: [
+    '⚡ 5-week sprint breakdown',
+    '🛠️ Add hands-on capstone project',
+    '⏱️ Set lesson duration to 60m',
+    '📦 Specify tools and libraries',
+  ],
+  assessment: [
+    '🎯 Add 4-tier grading rubrics for all labs',
+    '🧠 Generate scenario-based MCQs',
+    '👥 Add group project evaluation',
+    '🔬 Focus on code quality & tests',
+  ],
+  survey: [
+    '⏱️ Add course pacing & workload check',
+    '💬 Include open-ended instructor feedback',
+    '🌟 Standard 1-5 Likert scale questions',
+    '⚡ Quick 5-question pulse check',
+  ],
+  content: [
+    '🛠️ Step-by-step lab walkthrough',
+    '📽️ Presentation slides & outline',
+    '💻 GitHub repository & dev setup',
+    '📑 Reference reading guide',
+  ],
+  training_profile: [
+    '🎯 Set 80% attendance requirement',
+    '💼 Enterprise-ready applied engineering',
+    '🚀 Fast-track foundational skills',
+  ],
+};
+
+const GENERATION_STAGES = [
+  '🔍 Grounding on course objectives & context...',
+  '📐 Structuring draft elements and milestones...',
+  '📝 Calibrating deliverables, questions & rubrics...',
+  '🛡️ Validating schema compliance and syncing canvas...',
+];
+
 export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
   activeTab,
   trainingData,
@@ -49,6 +88,8 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingStage, setLoadingStage] = useState(0);
+  const [draftHistory, setDraftHistory] = useState<Record<string, any>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -61,6 +102,8 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
 
   // Convert TabType to backend clean tab string
   const backendTabName = activeTab.replace('_', '-');
+  const currentChips = TAB_QUICK_CHIPS[activeTab] || TAB_QUICK_CHIPS.module;
+  const storageKey = `copilot_chat_${trainingId}_${activeTab}`;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -72,12 +115,51 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
     }
   }, [messages, isOpen, isLoading]);
 
-  // Load initial elicitation question when Copilot opens on a tab if empty
+  // Stage progression timer when generating
   useEffect(() => {
-    if (isOpen && messages.length === 0) {
-      loadInitialElicitation();
+    let timer: any = null;
+    if (isLoading) {
+      setLoadingStage(0);
+      timer = setInterval(() => {
+        setLoadingStage((prev) => (prev < GENERATION_STAGES.length - 1 ? prev + 1 : prev));
+      }, 2800);
+    } else {
+      setLoadingStage(0);
     }
-  }, [isOpen, activeTab]);
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isLoading]);
+
+  // Load chat from localStorage or load initial elicitation
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+          return;
+        }
+      } catch {
+        // Fallback to initial elicitation
+      }
+    }
+    loadInitialElicitation();
+  }, [isOpen, activeTab, trainingId]);
+
+  // Persist messages to localStorage
+  useEffect(() => {
+    if (messages.length > 0) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(messages));
+      } catch {
+        // ignore
+      }
+    }
+  }, [messages, storageKey]);
 
   const loadInitialElicitation = async () => {
     setIsLoading(true);
@@ -138,6 +220,12 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
         currentDraft = { modules: trainingData.modules };
       } else if (backendTabName === 'content-description' && trainingData.contents?.length) {
         currentDraft = { contents: trainingData.contents };
+      } else if (backendTabName === 'assessment' && trainingData.assessments?.length) {
+        currentDraft = { sections: trainingData.assessments };
+      } else if (backendTabName === 'survey' && trainingData.surveys?.length) {
+        currentDraft = { surveys: trainingData.surveys };
+      } else if (backendTabName === 'training-profile' && trainingData.training) {
+        currentDraft = { training: trainingData.training };
       }
 
       const response: DesignerCopilotResponse = await sendDesignerCopilotTurn({
@@ -181,8 +269,11 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
 
       setMessages((prev) => [...prev, assistantMsg]);
 
-      // If draft was updated by Copilot, apply directly to canvas!
+      // If draft was updated by Copilot, save current draft to history for revert, then apply directly to canvas!
       if (isDraftUpdated && draftToApply && onApplyDraftToCanvas) {
+        if (currentDraft) {
+          setDraftHistory((prev) => ({ ...prev, [backendTabName]: currentDraft }));
+        }
         onApplyDraftToCanvas(backendTabName, draftToApply);
       }
     } catch (err: any) {
@@ -200,11 +291,35 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
     }
   };
 
+  const handleRevertDraft = (tab: string) => {
+    const prevDraft = draftHistory[tab];
+    if (prevDraft && onApplyDraftToCanvas) {
+      onApplyDraftToCanvas(tab, prevDraft);
+      setDraftHistory((old) => {
+        const copy = { ...old };
+        delete copy[tab];
+        return copy;
+      });
+      const revertNotice: ChatMessage = {
+        id: `rev-${Date.now()}`,
+        sender: 'assistant',
+        text: `↺ Reverted **${tabDisplayName}** canvas to the previous draft.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((msgs) => [...msgs, revertNotice]);
+    }
+  };
+
   const handleSelectOption = (option: CopilotChoiceOption) => {
     handleSendTurn(option.label, option.id);
   };
 
   const handleResetSession = () => {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore
+    }
     setMessages([]);
     loadInitialElicitation();
   };
@@ -302,6 +417,17 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
                           <CheckCircle2 className="w-4 h-4" />
                           <span>Canvas draft updated live</span>
                         </div>
+                        {draftHistory[backendTabName] && (
+                          <button
+                            type="button"
+                            onClick={() => handleRevertDraft(backendTabName)}
+                            className="text-[11px] font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded border border-amber-200 transition-colors flex items-center gap-1"
+                            title="Undo this draft update and restore previous state"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            Revert
+                          </button>
+                        )}
                       </div>
                     )}
 
@@ -454,38 +580,42 @@ export const CurriculumCopilot: React.FC<CurriculumCopilotProps> = ({
             ))}
 
             {isLoading && (
-              <div className="flex items-center gap-2 text-xs text-indigo-600 bg-indigo-50 border border-indigo-100 p-3 rounded-xl animate-pulse">
-                <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
-                <span>Copilot is analyzing context and formulating recommendations...</span>
+              <div className="space-y-2 bg-indigo-50/70 border border-indigo-100 p-3.5 rounded-xl">
+                <div className="flex items-center justify-between text-xs text-indigo-700 font-semibold">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
+                    <span>{GENERATION_STAGES[loadingStage]}</span>
+                  </div>
+                  <span className="text-[10px] text-indigo-500 font-mono">
+                    Step {loadingStage + 1}/{GENERATION_STAGES.length}
+                  </span>
+                </div>
+                <div className="w-full bg-indigo-200/60 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-indigo-600 h-1.5 rounded-full transition-all duration-700 ease-out"
+                    style={{ width: `${((loadingStage + 1) / GENERATION_STAGES.length) * 100}%` }}
+                  />
+                </div>
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Suggestions */}
-          <div className="px-4 py-2 border-t border-gray-100 bg-white flex gap-1.5 overflow-x-auto text-xs no-scrollbar">
-            <button
-              onClick={() => handleSendTurn('Make assignments more practical')}
-              disabled={isLoading}
-              className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full whitespace-nowrap text-[11px] transition-colors"
-            >
-              🛠️ More practical
-            </button>
-            <button
-              onClick={() => handleSendTurn('Add evaluation rubrics to each module')}
-              disabled={isLoading}
-              className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full whitespace-nowrap text-[11px] transition-colors"
-            >
-              📊 Add rubrics
-            </button>
-            <button
-              onClick={() => handleSendTurn('Regenerate with an intensive 3-module pacing')}
-              disabled={isLoading}
-              className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full whitespace-nowrap text-[11px] transition-colors"
-            >
-              ⚡ Fast-track 3 modules
-            </button>
-          </div>
+          {/* Quick Suggestions - Tab Aware */}
+          {currentChips.length > 0 && (
+            <div className="px-4 py-2 border-t border-gray-100 bg-white flex gap-1.5 overflow-x-auto text-xs no-scrollbar">
+              {currentChips.map((chip, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleSendTurn(chip.replace(/^[\p{Emoji}\s]+/u, ''))}
+                  disabled={isLoading}
+                  className="px-2.5 py-1 bg-gray-100 hover:bg-indigo-50 hover:text-indigo-700 text-gray-700 rounded-full whitespace-nowrap text-[11px] font-medium transition-colors border border-transparent hover:border-indigo-200"
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Input Footer */}
           <form
