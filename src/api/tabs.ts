@@ -162,12 +162,16 @@ export function extractBackendErrorMessage(status: number, body: unknown): strin
   return `Generation failed: ${status}`;
 }
 
-/** True when the failure indicates the backend was unreachable (not a real HTTP error). */
-function isBackendUnreachableError(err: unknown): boolean {
+/** True when the failure indicates the backend was unreachable (not a real HTTP error).
+ *
+ * A client-side abort is deliberately NOT classified here: our own timeout
+ * timer is not a connectivity failure, and substituting demo content for a
+ * timed-out real generation would misreport the failure.
+ */
+export function isBackendUnreachableError(err: unknown): boolean {
   const e = err as any;
   const message = String(e?.message ?? '');
   return (
-    e?.name === 'AbortError' ||
     message.includes('Failed to fetch') ||
     message.includes('NetworkError') ||
     message.includes('Could not connect') ||
@@ -434,7 +438,20 @@ export async function generateTabDraft<T = any>(
     LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = normalized as TabDraftResponse;
     return normalized as TabDraftResponse<T>;
   } catch (err: unknown) {
-    // Backend unreachable (connection refused / DNS / abort): provide a clearly
+    // A client-side abort is OUR OWN timeout, not a connectivity failure:
+    // the backend may still be processing a long real generation and will
+    // save the finished draft in its cache. Harvest it before reporting a
+    // timeout — never substitute demo content for a timed-out generation.
+    if ((err as any)?.name === 'AbortError') {
+      const harvested = await pollBackendDraftAfterTimeout<T>(tab, trainingId);
+      if (harvested) return harvested;
+      throw new Error(
+        `AI generation timed out after ${Math.round(GENERATION_TIMEOUT_MS / 1000)}s ` +
+        `and did not complete within the additional ${Math.round(TIMEOUT_POLL_DEADLINE_MS / 1000)}s ` +
+        'wait. The backend may still be processing — press Generate again in a moment.'
+      );
+    }
+    // Backend unreachable (connection refused / DNS): provide a clearly
     // identified local demo draft instead of failing the demo workflow.
     if (isBackendUnreachableError(err)) {
       console.warn(`[API] ${getApiBase()} unavailable. Using OFFLINE DEMO draft for tab '${tab}'.`);
@@ -448,6 +465,36 @@ export async function generateTabDraft<T = any>(
     }
     throw err;
   }
+}
+
+/**
+ * After a client timeout the backend keeps processing and saves the finished
+ * draft in its own cache. Poll the draft endpoint so a long real generation
+ * is harvested instead of lost. Only backend drafts are accepted — a stale
+ * local/offline-mock entry must never masquerade as the live result.
+ */
+export const TIMEOUT_POLL_INTERVAL_MS = 10_000;
+export const TIMEOUT_POLL_DEADLINE_MS = 600_000;
+
+export async function pollBackendDraftAfterTimeout<T = any>(
+  tab: TabName,
+  trainingId: string,
+  opts?: { intervalMs?: number; deadlineMs?: number }
+): Promise<TabDraftResponse<T> | null> {
+  const interval = opts?.intervalMs ?? TIMEOUT_POLL_INTERVAL_MS;
+  const deadline = Date.now() + (opts?.deadlineMs ?? TIMEOUT_POLL_DEADLINE_MS);
+  while (Date.now() < deadline) {
+    await sleep(interval);
+    try {
+      const cached = await getCachedDraft<T>(tab, trainingId);
+      if (cached && cached.source === 'backend' && cached.tab === tab) {
+        return cached;
+      }
+    } catch {
+      // Transient polling errors are not fatal; keep waiting for the backend.
+    }
+  }
+  return null;
 }
 
 /**

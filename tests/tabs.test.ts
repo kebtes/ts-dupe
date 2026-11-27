@@ -10,6 +10,8 @@ import {
   generateTabDraft,
   getCachedDraft,
   extractBackendErrorMessage,
+  isBackendUnreachableError,
+  pollBackendDraftAfterTimeout,
   GENERATION_TIMEOUT_MS,
   DRAFT_TIMEOUT_MS,
   OFFLINE_MOCK_MODEL,
@@ -180,6 +182,83 @@ describe('offline fallback identification', () => {
     );
 
     await expect(generateTabDraft('module', 'train-1')).rejects.toThrow('Modules are required.');
+  });
+
+  it('reports a client timeout accurately instead of substituting demo content', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        // The generation POST itself hits the client timeout.
+        const abort = new Error('This operation was aborted');
+        (abort as any).name = 'AbortError';
+        throw abort;
+      }
+      // Draft-cache polls: backend never finishes.
+      return new Response('{}', { status: 404 });
+    }));
+    vi.useFakeTimers();
+    try {
+      const pending = generateTabDraft('module', 'train-timeout');
+      const expectation = expect(pending).rejects.toThrow(
+        /AI generation timed out after 180s/
+      );
+      // Drive the harvest window (600s) forward without real waiting.
+      await vi.advanceTimersByTimeAsync(700_000);
+      await expectation;
+      expect(calls).toBeGreaterThan(2); // it polled instead of giving up
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('classifies only genuine network failures as unreachable', async () => {
+    const abort = new Error('This operation was aborted');
+    (abort as any).name = 'AbortError';
+    expect(isBackendUnreachableError(abort)).toBe(false);
+    expect(isBackendUnreachableError(new TypeError('Failed to fetch'))).toBe(true);
+    expect(isBackendUnreachableError(new Error('fetch failed'))).toBe(true);
+    expect(isBackendUnreachableError(new Error('Modules are required.'))).toBe(false);
+  });
+
+  it('harvests a late real draft from the backend cache after a timeout', async () => {
+    // Backend still processing -> 404, then it finishes -> 200 envelope.
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) return new Response('{}', { status: 404 });
+      return new Response(JSON.stringify(moduleEnvelope), { status: 200 });
+    }));
+
+    const result = await pollBackendDraftAfterTimeout('module', 'train-poll', {
+      intervalMs: 5, deadlineMs: 200,
+    });
+    expect(result).not.toBeNull();
+    expect(result?.source).toBe('backend');
+    expect(result?.tab).toBe('module');
+  });
+
+  it('never accepts a local/offline-mock entry as a harvested draft', async () => {
+    // Prime the LOCAL cache with an offline mock, then make every backend
+    // poll return 404 (which falls back to the local entry internally).
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }));
+    await generateTabDraft('module', 'train-poll-mock');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })));
+
+    const result = await pollBackendDraftAfterTimeout('module', 'train-poll-mock', {
+      intervalMs: 5, deadlineMs: 60,
+    });
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the backend never finishes within the poll window', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })));
+    const result = await pollBackendDraftAfterTimeout('assessment', 'train-none', {
+      intervalMs: 5, deadlineMs: 60,
+    });
+    expect(result).toBeNull();
   });
 
   it('falls back to the local cache on 404 draft retrieval', async () => {
