@@ -1,232 +1,279 @@
 // src/api/tabs.ts
+//
+// API client for the AI Curriculum Builder backend (authoritative contract):
+//   POST /v1/training-tabs/{tab}       body: { training_id, target: { kind, id } | null }
+//   GET  /v1/training-tabs/{tab}/draft?training_id={id}
+//
+// When the backend cannot be reached, a locally generated demo draft is
+// returned instead. Every such response is unmistakably marked with
+// `source: 'offline-mock'`, model `offline-demo`, and an explicit warning —
+// it must never be presented as real AI output.
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://127.0.0.1:8002';
-const COMPANY_ID = (import.meta as any).env?.VITE_COMPANY_ID || '816e9eab-f109-4de2-b7aa-154f8cb2ac67';
-const USER_ROLE = (import.meta as any).env?.VITE_USER_ROLE || 'admin';
-const USER_ID = (import.meta as any).env?.VITE_USER_ID || 'designer-1';
+import type {
+  TabName,
+  GenerationTarget,
+  BackendTabEnvelope,
+  TrainingProfileDraftData,
+  ModuleDraftData,
+  SurveyDraftData,
+  AssessmentDraftData,
+  ContentDescriptionDraftData,
+  ModuleRubric,
+  BackendTrainingStructure,
+} from './adapters';
+import { normalizeTabDraft } from './adapters';
 
-const DEFAULT_HEADERS = {
-  'Content-Type': 'application/json',
-  'Authorization': 'Bearer dev-token',
-  'X-TSP-User-ID': USER_ID,
-  'X-TSP-Company-ID': COMPANY_ID,
-  'X-TSP-Role': USER_ROLE,
-};
+export type {
+  TabName,
+  GenerationTarget,
+  TrainingProfileDraftData,
+  ModuleDraftData,
+  SurveyDraftData,
+  AssessmentDraftData,
+  ContentDescriptionDraftData,
+  ModuleRubric,
+  BackendTrainingStructure,
+  BackendModuleStructure,
+  BackendLessonStructure,
+  ContentTargetOption,
+} from './adapters';
+export { DraftValidationError } from './adapters';
 
-export type TabName =
-  | 'training-profile'
-  | 'module'
-  | 'content-description'
-  | 'survey'
-  | 'assessment';
-
-export interface TrainingProfileDraftData {
-  scope: string;
+/** Base URL for the AI Curriculum Builder backend (VITE_API_BASE). */
+export function getApiBase(): string {
+  return envString('VITE_API_BASE') || 'http://localhost:8000';
 }
 
-export interface PracticalAssignment {
-  title: string;
-  description: string;
-  evidence_of_completion: string;
+/** Legacy demo training used when no backend training is configured. */
+const LEGACY_TRAINING_ID = 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+
+type EnvReader = (name: string) => unknown;
+
+let envOverride: EnvReader | null = null;
+
+/**
+ * Test hook: replace the environment source (tests inject a plain map).
+ * Production never calls this; `import.meta.env` remains the only source.
+ */
+export function setEnvReaderForTests(reader: EnvReader | null): void {
+  envOverride = reader;
 }
 
-export interface Lesson {
-  id?: string;
-  title: string;
-  objective: string;
-  duration: number;
-  duration_type: string;
-  order: number;
+function envString(name: string): string {
+  const raw = envOverride ? envOverride(name) : (import.meta as any).env?.[name];
+  return String(raw ?? '').trim();
 }
 
-export interface Topic {
-  title: string;
-  order: number;
-  lessons: Lesson[];
+/** Company header value, configured via VITE_TSP_COMPANY_ID for the live demo. */
+export function getCompanyId(): string {
+  return envString('VITE_TSP_COMPANY_ID') || 'co-1';
 }
 
-export interface ModuleItem {
-  id?: string;
-  title: string;
-  description: string;
-  order: number;
-  practical_assignment?: PracticalAssignment;
-  topics?: Topic[];
+/**
+ * Resolve the training ID sent to the backend:
+ * 1. VITE_TRAINING_ID (configured live demo training) — takes precedence so
+ *    generation always targets the backend record.
+ * 2. The training id present in the displayed (demo) data.
+ * 3. The legacy demo training id.
+ */
+export function getActiveTrainingId(displayedTrainingId?: string): string {
+  return envString('VITE_TRAINING_ID') || displayedTrainingId || LEGACY_TRAINING_ID;
 }
 
-export interface ModuleDraftData {
-  modules: ModuleItem[];
+/** True when the configured backend training differs from the displayed demo record. */
+export function isConfiguredTrainingOverride(displayedTrainingId?: string): boolean {
+  const configured = envString('VITE_TRAINING_ID');
+  return Boolean(configured) && configured !== displayedTrainingId;
 }
 
-export interface ContentDescriptionItem {
-  lesson_id: string;
-  lesson_title: string;
-  content_description: string;
-  key_takeaways: string[];
+/** Shared headers for all backend calls (env-driven company id). */
+export function defaultHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer dev-token',
+    'X-TSP-User-ID': 'designer-1',
+    'X-TSP-Company-ID': getCompanyId(),
+    'X-TSP-Role': 'designer',
+  };
 }
 
-export interface ContentDescriptionDraftData {
-  title?: string;
-  description?: string;
-  contents?: ContentDescriptionItem[];
-}
+/**
+ * Backend tab generation performs one model call of up to ~120s (plus bounded
+ * retries), so the client-side generation budget is 180 seconds.
+ */
+export const GENERATION_TIMEOUT_MS = 180_000;
+/** Draft retrieval is an in-memory cache read; a short budget suffices. */
+export const DRAFT_TIMEOUT_MS = 15_000;
+/** Artificial latency for the offline demo fallback so it feels realistic. */
+export const OFFLINE_MOCK_LATENCY_MS = 800;
 
-export interface SurveyQuestionItem {
-  prompt?: string;
-  question?: string;
-  type: string;
-  order?: number;
-  options?: string[];
-}
+/** Model name used only for offline demo fallbacks. */
+export const OFFLINE_MOCK_MODEL = 'offline-demo';
 
-export interface SurveySectionItem {
-  title: string;
-  questions: SurveyQuestionItem[];
-}
+export const OFFLINE_MOCK_WARNING =
+  'OFFLINE DEMO: the AI backend could not be reached. This draft was generated locally for demonstration only and is NOT live AI output.';
 
-export interface SurveyDraftData {
-  questions?: SurveyQuestionItem[];
-  sections?: SurveySectionItem[];
-}
-
-export interface AssessmentOption {
-  text?: string;
-  is_correct?: boolean;
-  rationale?: string;
-}
-
-export interface AssessmentQuestionItem {
-  lesson_id?: string;
-  prompt?: string;
-  question?: string;
-  type?: string;
-  weight?: number;
-  options?: (AssessmentOption | string)[];
-  correct_answer?: string;
-  rubric?: any;
-}
-
-export interface AssessmentSectionItem {
-  title: string;
-  questions: AssessmentQuestionItem[];
-}
-
-export interface AssessmentDraftData {
-  questions?: AssessmentQuestionItem[];
-  sections?: AssessmentSectionItem[];
-  uncovered_lessons?: string[];
-}
+export type TabDraftSource = 'backend' | 'offline-mock';
 
 export interface TabDraftResponse<T = any> {
-  status: 'success' | 'error';
+  status: 'success';
   tab: TabName;
   training_id?: string;
   company_id?: string;
   data: T;
   warnings?: string[];
+  /** Lessons with no generated assessment coverage (backend envelope field). */
+  uncovered_lessons?: string[];
   model?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
   request_id?: string;
   created_at?: number;
   updated_at?: number;
+  /** Response origin: 'backend' = live AI service; 'offline-mock' = local demo fallback. */
+  source?: TabDraftSource;
 }
 
 // In-memory cache for fallback when backend is offline
-const LOCAL_DRAFT_CACHE: Record<string, any> = {};
+const LOCAL_DRAFT_CACHE: Record<string, TabDraftResponse> = {};
 
-// Fallback generator matching backend guides
-function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
+/**
+ * Extract a human-readable message from a backend error body.
+ *
+ * The backend always returns a flat structured body:
+ *   { error_class, message, request_id, ...extra }
+ * A legacy FastAPI `{ detail: ... }` shape is still tolerated, and the
+ * original status-aware fallback messages are preserved.
+ */
+export function extractBackendErrorMessage(status: number, body: unknown): string {
+  const data = (body ?? {}) as Record<string, any>;
+
+  const flat = typeof data.message === 'string' ? data.message.trim() : '';
+  if (flat) return flat;
+
+  const detail = data.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail.trim();
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string' && detail.message.trim()) {
+    return detail.message.trim();
+  }
+
+  if (status === 401) return 'Authentication required. Please check your session.';
+  if (status === 422 || status === 400) return 'Please generate/save the earlier tab first.';
+  if (status === 403) return 'Only course designers can generate curriculum recommendations.';
+  if (status >= 500) return 'AI model unavailable. Try again in a moment.';
+  return `Generation failed: ${status}`;
+}
+
+/** True when the failure indicates the backend was unreachable (not a real HTTP error).
+ *
+ * A client-side abort is deliberately NOT classified here: our own timeout
+ * timer is not a connectivity failure, and substituting demo content for a
+ * timed-out real generation would misreport the failure.
+ */
+export function isBackendUnreachableError(err: unknown): boolean {
+  const e = err as any;
+  const message = String(e?.message ?? '');
+  return (
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError') ||
+    message.includes('Could not connect') ||
+    message.includes('fetch failed') ||
+    message.includes('load failed')
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Fallback generator matching backend contract shapes (NOT real AI output)
+// Offline fallback generator matching backend contract shapes (NOT real AI
+// output). Exported for the copilot module's offline fallback only.
+export function getMockDraft(
+  tab: TabName,
+  trainingId: string,
+  target?: GenerationTarget | null
+): BackendTabEnvelope {
   const timestamp = Date.now() / 1000;
+  const base = {
+    status: 'success' as const,
+    tab,
+    training_id: trainingId,
+    company_id: 'co-1',
+    model: OFFLINE_MOCK_MODEL,
+    request_id: `offline-${Date.now()}`,
+    created_at: timestamp,
+    updated_at: timestamp,
+    warnings: [OFFLINE_MOCK_WARNING],
+  };
 
   switch (tab) {
     case 'training-profile':
       return {
-        status: 'success',
-        tab,
-        training_id: trainingId,
-        company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
-        request_id: `req-${Date.now()}`,
-        created_at: timestamp,
-        updated_at: timestamp,
-        warnings: [],
+        ...base,
         data: {
+          keywords: ['software engineering', 'architecture', 'testing', 'CI/CD'],
           scope:
             'This training provides a comprehensive foundation in modern software engineering practices. Learners will explore core architectural patterns, automated testing strategies, and CI/CD pipelines.\n\nBy completing hands-on assignments and modular quizzes, participants will build real-world systems with high reliability, maintainability, and security standards.',
+          attendance_threshold: 80.0,
+          assessment_threshold: 70.0,
+          alignment_standards: [],
+          delivery_tools: [],
+          tech_requirements: [],
+          prior_knowledge: [],
+          learning_styles: [],
+          objectives: [
+            'Apply core architectural patterns to decoupled system design.',
+            'Design automated testing strategies for reliable delivery.',
+          ],
         },
       };
 
     case 'module':
       return {
-        status: 'success',
-        tab,
-        training_id: trainingId,
-        company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
-        request_id: `req-${Date.now()}`,
-        created_at: timestamp,
-        updated_at: timestamp,
-        warnings: [],
+        ...base,
         data: {
           modules: [
             {
-              id: 'mod-ai-1',
               title: 'Module 1: Foundations & Architecture',
-              description: 'Core concepts and cloud development environment setup.',
-              order: 1,
               practical_assignment: {
                 title: 'Lab 1: Environment Setup',
                 description: 'Configure your local environment and deploy a hello-world container.',
                 evidence_of_completion: 'Working container logs and health-check screenshot.',
               },
-              topics: [
+              lessons: [
                 {
-                  title: 'Topic 1: Introduction to Distributed Systems',
-                  order: 1,
-                  lessons: [
-                    {
-                      id: 'lesson-uuid-1',
-                      title: 'Lesson 1: System Overview',
-                      objective: 'Understand system components and decoupled architecture.',
-                      duration: 20,
-                      duration_type: 'MINUTES',
-                      order: 1,
-                    },
-                    {
-                      id: 'lesson-uuid-2',
-                      title: 'Lesson 2: Tooling & Setup',
-                      objective: 'Install required CLI utilities, Docker, and dependencies.',
-                      duration: 30,
-                      duration_type: 'MINUTES',
-                      order: 2,
-                    },
-                  ],
+                  title: 'Lesson 1: System Overview',
+                  objective: 'Understand system components and decoupled architecture.',
+                  duration: 20,
+                  duration_type: 'MINUTES',
+                },
+                {
+                  title: 'Lesson 2: Tooling & Setup',
+                  objective: 'Install required CLI utilities, Docker, and dependencies.',
+                  duration: 30,
+                  duration_type: 'MINUTES',
                 },
               ],
             },
             {
-              id: 'mod-ai-2',
               title: 'Module 2: Applied Machine Learning & Predictive Pipelines',
-              description: 'End-to-end data processing, feature engineering, and inference pipelines.',
-              order: 2,
               practical_assignment: {
                 title: 'Lab 2: Real-time Model Serving',
                 description: 'Build an inference API endpoint with automated latency metrics.',
                 evidence_of_completion: 'Benchmark report and Swagger docs URL.',
               },
-              topics: [
+              lessons: [
                 {
-                  title: 'Topic 1: Feature Transformation',
-                  order: 1,
-                  lessons: [
-                    {
-                      id: 'lesson-uuid-3',
-                      title: 'Lesson 1: Data Cleansing & Embeddings',
-                      objective: 'Clean raw datasets and build semantic vector embeddings.',
-                      duration: 45,
-                      duration_type: 'MINUTES',
-                      order: 1,
-                    },
-                  ],
+                  title: 'Lesson 1: Data Cleansing & Embeddings',
+                  objective: 'Clean raw datasets and build semantic vector embeddings.',
+                  duration: 45,
+                  duration_type: 'MINUTES',
+                },
+                {
+                  title: 'Lesson 2: Serving & Monitoring',
+                  objective: 'Deploy an inference service and monitor live latency metrics.',
+                  duration: 40,
+                  duration_type: 'MINUTES',
                 },
               ],
             },
@@ -236,82 +283,46 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
 
     case 'content-description':
       return {
-        status: 'success',
-        tab,
-        training_id: trainingId,
-        company_id: 'co-1',
-        model: 'mimo-v2.6-flash',
-        request_id: `req-${Date.now()}`,
-        created_at: timestamp,
-        updated_at: timestamp,
-        warnings: [],
+        ...base,
         data: {
-          title: 'Practical Hands-on Learning Guide',
           description:
-            'A comprehensive module-focused resource designed to guide learners through key theoretical foundations, practical implementations, and real-world evaluation workflows.',
-          contents: [
-            {
-              lesson_id: 'lesson-uuid-1',
-              lesson_title: 'Lesson 1: System Overview',
-              content_description:
-                'Detailed walkthrough explaining distributed microservices, messaging queues, and state synchronization across fault-tolerant boundaries.',
-              key_takeaways: [
-                'Microservices communicate via asynchronous events and message brokers',
-                'State is persisted in isolated domain stores with eventual consistency',
-                'Health checks and circuit breakers ensure zero-downtime deployment',
-              ],
-            },
-            {
-              lesson_id: 'lesson-uuid-2',
-              lesson_title: 'Lesson 2: Tooling & Setup',
-              content_description:
-                'Step-by-step containerization tutorial configuring environment variables, volumes, and network bridge drivers.',
-              key_takeaways: [
-                'Standardized Docker configurations guarantee reproducible builds',
-                'Multi-stage builds reduce final image size and attack surface',
-              ],
-            },
-          ],
+            'Detailed walkthrough explaining distributed microservices, messaging queues, and state synchronization across fault-tolerant boundaries.',
         },
       };
 
     case 'survey':
       return {
-        status: 'success',
-        tab,
-        training_id: trainingId,
-        company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
-        request_id: `req-${Date.now()}`,
-        created_at: timestamp,
-        updated_at: timestamp,
-        warnings: [],
+        ...base,
         data: {
-          questions: [
+          sections: [
             {
-              question: 'The lesson objectives were clear and easy to follow.',
-              type: 'likert',
-              order: 1,
-            },
-            {
-              question: 'The pace of the curriculum was appropriate for my skill level.',
-              type: 'likert',
-              order: 2,
-            },
-            {
-              question: 'The practical lab assignments helped reinforce the theoretical material.',
-              type: 'likert',
-              order: 3,
-            },
-            {
-              question: 'The course materials and code examples were up to date.',
-              type: 'likert',
-              order: 4,
-            },
-            {
-              question: 'I feel confident applying what I learned to real-world tasks.',
-              type: 'likert',
-              order: 5,
+              title: 'Learner Experience',
+              questions: [
+                {
+                  prompt: 'The lesson objectives were clear and easy to follow.',
+                  type: 'SINGLE_CHOICE',
+                  options: ['Strongly agree', 'Agree', 'Neutral', 'Disagree', 'Strongly disagree'],
+                },
+                {
+                  prompt: 'The pace of the curriculum was appropriate for my skill level.',
+                  type: 'SINGLE_CHOICE',
+                  options: ['Strongly agree', 'Agree', 'Neutral', 'Disagree', 'Strongly disagree'],
+                },
+                {
+                  prompt: 'The practical lab assignments helped reinforce the theoretical material.',
+                  type: 'SINGLE_CHOICE',
+                  options: ['Strongly agree', 'Agree', 'Neutral', 'Disagree', 'Strongly disagree'],
+                },
+                {
+                  prompt: 'Which part of the training did you find most useful?',
+                  type: 'MULTIPLE_CHOICE',
+                  options: ['Lectures', 'Labs', 'Quizzes', 'Readings'],
+                },
+                {
+                  prompt: 'What would you improve about this training?',
+                  type: 'TEXT',
+                },
+              ],
             },
           ],
         },
@@ -319,239 +330,96 @@ function getMockDraft(tab: TabName, trainingId: string): TabDraftResponse {
 
     case 'assessment':
       return {
-        status: 'success',
-        tab,
-        training_id: trainingId,
-        company_id: 'co-1',
-        model: 'gemma4:31b-cloud',
-        request_id: `req-${Date.now()}`,
-        created_at: timestamp,
-        updated_at: timestamp,
-        warnings: [],
+        ...base,
+        uncovered_lessons: [],
         data: {
-          questions: [
+          sections: [
             {
-              lesson_id: 'lesson-uuid-1',
-              question:
-                'Which communication mechanism is best suited for decoupled event-driven updates?',
-              options: [
+              title: 'Knowledge Check',
+              questions: [
                 {
-                  text: 'Message Queue (e.g. RabbitMQ / Kafka)',
-                  is_correct: true,
-                  rationale: 'Message queues decouple producers from consumers asynchronously.',
+                  prompt: 'Which communication mechanism is best suited for decoupled event-driven updates?',
+                  type: 'MULTIPLE_CHOICE',
+                  weight: 1.0,
+                  options: [
+                    'Message Queue (e.g. RabbitMQ / Kafka)',
+                    'Synchronous HTTP polling every 10ms',
+                    'Direct shared file locking',
+                    'Hardcoded memory addresses',
+                  ],
+                  correct_answer: 'Message Queue (e.g. RabbitMQ / Kafka)',
                 },
                 {
-                  text: 'Synchronous HTTP polling every 10ms',
-                  is_correct: false,
-                  rationale: 'High latency and high overhead on network and database resources.',
-                },
-                {
-                  text: 'Direct shared file locking',
-                  is_correct: false,
-                  rationale: 'Does not scale across distributed services and causes deadlocks.',
-                },
-                {
-                  text: 'Hardcoded memory addresses',
-                  is_correct: false,
-                  rationale: 'Invalid across separate container and machine boundaries.',
-                },
-              ],
-            },
-            {
-              lesson_id: 'lesson-uuid-2',
-              question: 'Why are multi-stage Docker builds recommended for production images?',
-              options: [
-                {
-                  text: 'They isolate build-time tools from runtime dependencies, minimizing attack surface and image size.',
-                  is_correct: true,
-                  rationale: 'Compilation tools are left behind in the build stage, creating slim containers.',
-                },
-                {
-                  text: 'They make containers run twice as fast on CPU.',
-                  is_correct: false,
-                  rationale: 'Multi-stage builds only affect image layers, not raw runtime instruction speed.',
+                  prompt: 'Why are multi-stage Docker builds recommended for production images?',
+                  type: 'MULTIPLE_CHOICE',
+                  weight: 1.0,
+                  options: [
+                    'They isolate build-time tools from runtime dependencies, minimizing attack surface and image size.',
+                    'They make containers run twice as fast on CPU.',
+                  ],
+                  correct_answer:
+                    'They isolate build-time tools from runtime dependencies, minimizing attack surface and image size.',
                 },
               ],
             },
           ],
-          uncovered_lessons: [],
+          module_rubrics: [
+            {
+              module_title: 'Module 1: Foundations & Architecture',
+              practical_assignment_title: 'Lab 1: Environment Setup',
+              linked_objectives: [
+                'Apply core architectural patterns to decoupled system design.',
+              ],
+              criteria:
+                'Learner configures a complete local environment and deploys a containerized hello-world service.',
+              performance_levels: [
+                { level: 'Excellent', points: 3, description: 'Environment fully working with documented health checks.' },
+                { level: 'Satisfactory', points: 2, description: 'Environment works with minor gaps in documentation.' },
+                { level: 'Needs improvement', points: 1, description: 'Environment incomplete or undocumented.' },
+              ],
+              source: 'ai-generated-from-module-practical-assignment',
+            },
+            {
+              module_title: 'Module 2: Applied Machine Learning & Predictive Pipelines',
+              practical_assignment_title: 'Lab 2: Real-time Model Serving',
+              linked_objectives: [
+                'Deploy an inference service and monitor live latency metrics.',
+              ],
+              criteria: 'Learner builds an inference API endpoint and reports automated latency benchmarks.',
+              performance_levels: [
+                { level: 'Excellent', points: 3, description: 'Endpoint live with benchmark report and docs.' },
+                { level: 'Satisfactory', points: 2, description: 'Endpoint live with partial benchmarks.' },
+                { level: 'Needs improvement', points: 1, description: 'Endpoint not demonstrably working.' },
+              ],
+              source: 'ai-generated-from-module-practical-assignment',
+            },
+          ],
         },
       };
   }
 }
 
 /**
- * Generate AI suggestion for a tab
+ * Generate AI suggestion for a tab via the live backend.
+ * Offline demo fallback only when the backend is unreachable.
  */
 export async function generateTabDraft<T = any>(
   tab: TabName,
-  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd',
-  target?: {
-    kind?: string;
-    id?: string;
-    target_type?: string;
-    target_id?: string;
-    title?: string;
-    name?: string;
-    description?: string;
-  }
+  trainingId: string,
+  target?: GenerationTarget
 ): Promise<TabDraftResponse<T>> {
   try {
     const controller = new AbortController();
-    // Allow up to 120 seconds for backend LLM generation
-    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    const timeoutId = setTimeout(() => controller.abort(), GENERATION_TIMEOUT_MS);
 
-    const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-    const payload: Record<string, any> = {
-      training_id: finalTrainingId,
-    };
-    if (target && ((target as any).kind || (target as any).target_type)) {
-      payload.target = {
-        kind: (target as any).kind || (target as any).target_type,
-        id: (target as any).id || (target as any).target_id,
-        title: (target as any).title,
-        name: (target as any).name,
-        description: (target as any).description,
-      };
-    }
-
-    const response = await fetch(`${API_BASE}/v1/training-tabs/${tab}`, {
+    const response = await fetch(`${getApiBase()}/v1/training-tabs/${tab}`, {
       method: 'POST',
-      headers: DEFAULT_HEADERS,
-      signal: controller.signal,
-      body: JSON.stringify(payload),
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const message =
-        errorData.message ||
-        errorData.detail?.message ||
-        errorData.detail ||
-        (response.status === 422 || response.status === 400
-          ? 'Please generate/save the earlier tab first.'
-          : response.status === 403
-          ? 'Only course designers can generate curriculum recommendations.'
-          : response.status >= 500
-          ? 'AI model unavailable. Try again in a moment.'
-          : `Generation failed: ${response.status}`);
-
-      const err = new Error(message);
-      (err as any).status = response.status;
-      throw err;
-    }
-
-    const result = await response.json();
-    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = result;
-    return result;
-  } catch (err: any) {
-    // If backend is not running (e.g. Failed to fetch / Connection refused), simulate realistic response
-    if (
-      err.name === 'AbortError' ||
-      err.message?.includes('Failed to fetch') ||
-      err.message?.includes('NetworkError') ||
-      err.message?.includes('Could not connect')
-    ) {
-      console.warn(`[API] ${API_BASE} unavailable. Using client AI draft generator for tab '${tab}'`);
-      await new Promise((r) => setTimeout(r, 800)); // realistic latency
-      const mock = getMockDraft(tab, trainingId) as TabDraftResponse<T>;
-      LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = mock;
-      return mock;
-    }
-    throw err;
-  }
-}
-
-/**
- * Retrieve cached AI suggestion draft for a tab
- */
-export async function getCachedDraft<T = any>(
-  tab: TabName,
-  trainingId: string = 'd734b694-0802-4a4a-8a51-eaa693a10abd'
-): Promise<TabDraftResponse<T> | null> {
-  const finalTrainingId = trainingId?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-    const response = await fetch(
-      `${API_BASE}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(finalTrainingId)}`,
-      {
-        method: 'GET',
-        headers: DEFAULT_HEADERS,
-        signal: controller.signal,
-      }
-    );
-
-    clearTimeout(timeoutId);
-
-    if (response.status === 404) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
-    }
-
-    if (!response.ok) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
-    }
-
-    const result = await response.json();
-    LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] = result;
-    return result;
-  } catch (err) {
-    return LOCAL_DRAFT_CACHE[`${tab}-${finalTrainingId}`] || null;
-  }
-}
-
-export interface CopilotChoiceOption {
-  id: string;
-  label: string;
-  description?: string;
-  is_recommended?: boolean;
-}
-
-export interface CopilotClarification {
-  question: string;
-  options: CopilotChoiceOption[];
-  allow_custom?: boolean;
-}
-
-export interface DesignerCopilotRequest {
-  training_id: string;
-  tab: string;
-  user_message?: string;
-  selected_option_id?: string;
-  current_draft?: any;
-  conversation_history?: Array<{ role: string; content: string }>;
-}
-
-export interface DesignerCopilotResponse {
-  status: string;
-  response_type: 'CLARIFICATION' | 'UPDATE_DRAFT' | 'CHAT';
-  message: string;
-  clarification?: CopilotClarification;
-  updated_draft?: any;
-  model?: string;
-}
-
-/**
- * Send an interactive turn to the Curriculum Designer Copilot
- */
-export async function sendDesignerCopilotTurn(
-  req: DesignerCopilotRequest
-): Promise<DesignerCopilotResponse> {
-  const finalTrainingId = req.training_id?.trim() || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000);
-
-    const response = await fetch(`${API_BASE}/v1/training-tabs/copilot`, {
-      method: 'POST',
-      headers: DEFAULT_HEADERS,
+      headers: defaultHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
-        ...req,
-        training_id: finalTrainingId,
+        training_id: trainingId,
+        // Backend TargetDTO: { kind, id } (extra="forbid")
+        target: target ? { kind: target.kind, id: target.id } : null,
       }),
     });
 
@@ -559,80 +427,199 @@ export async function sendDesignerCopilotTurn(
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const message =
-        errorData.message ||
-        errorData.detail?.message ||
-        errorData.detail ||
-        `Copilot turn failed: ${response.status}`;
-      throw new Error(message);
+      const message = extractBackendErrorMessage(response.status, errorData);
+      const err = new Error(message);
+      (err as any).status = response.status;
+      throw err;
     }
 
-    return await response.json();
-  } catch (err: any) {
-    // If backend is offline or network fails, provide client fallback
-    if (
-      err.name === 'AbortError' ||
-      err.message?.includes('Failed to fetch') ||
-      err.message?.includes('NetworkError') ||
-      err.message?.includes('Could not connect')
-    ) {
-      console.warn(`[Copilot API] Backend offline. Using client copilot fallback.`);
-      await new Promise((r) => setTimeout(r, 600));
-
-      if (req.selected_option_id) {
-        const mockTab = (req.tab === 'module' ? 'module' : req.tab) as TabName;
-        const mockDraft = getMockDraft(mockTab, finalTrainingId);
-        return {
-          status: 'success',
-          response_type: 'UPDATE_DRAFT',
-          message: `I've synthesized the initial draft for **${req.tab}** using your selected option. It has been applied to the canvas.`,
-          updated_draft: mockDraft.data,
-          model: 'mimo-v2.6-flash',
-        };
-      }
-
-      if (req.user_message && req.current_draft) {
-        return {
-          status: 'success',
-          response_type: 'UPDATE_DRAFT',
-          message: `I've updated the draft according to your feedback: "${req.user_message}". Changes are now active on the canvas.`,
-          updated_draft: req.current_draft,
-          model: 'mimo-v2.6-flash',
-        };
-      }
-
-      return {
-        status: 'success',
-        response_type: 'CLARIFICATION',
-        message: `I'm ready to assist with the **${req.tab}** section. Let's align on structure before generating:`,
-        clarification: {
-          question: `How would you like to structure the ${req.tab} section?`,
-          options: [
-            {
-              id: 'opt_mod_5',
-              label: '5 Modules (Recommended)',
-              description: 'Standard 8-week duration breakdown across core AI topics and projects.',
-              is_recommended: true,
-            },
-            {
-              id: 'opt_mod_3',
-              label: '3 Modules (Intensive)',
-              description: 'Fast-track foundations with larger consolidated milestones.',
-              is_recommended: false,
-            },
-            {
-              id: 'opt_mod_6',
-              label: '6 Modules (Weekly Sprints)',
-              description: 'Weekly sprint breakdown with continuous lab milestones.',
-              is_recommended: false,
-            },
-          ],
-          allow_custom: true,
-        },
-        model: 'mimo-v2.6-flash',
-      };
+    const result = await response.json();
+    const normalized = normalizeTabDraft(tab, result, {
+      source: 'backend',
+      target: target ? { ...target } : null,
+    });
+    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = normalized as TabDraftResponse;
+    return normalized as TabDraftResponse<T>;
+  } catch (err: unknown) {
+    // A client-side abort is OUR OWN timeout, not a connectivity failure:
+    // the backend may still be processing a long real generation and will
+    // save the finished draft in its cache. Harvest it before reporting a
+    // timeout — never substitute demo content for a timed-out generation.
+    if ((err as any)?.name === 'AbortError') {
+      const harvested = await pollBackendDraftAfterTimeout<T>(tab, trainingId);
+      if (harvested) return harvested;
+      throw new Error(
+        `AI generation timed out after ${Math.round(GENERATION_TIMEOUT_MS / 1000)}s ` +
+        `and did not complete within the additional ${Math.round(TIMEOUT_POLL_DEADLINE_MS / 1000)}s ` +
+        'wait. The backend may still be processing — press Generate again in a moment.'
+      );
+    }
+    // Backend unreachable (connection refused / DNS): provide a clearly
+    // identified local demo draft instead of failing the demo workflow.
+    if (isBackendUnreachableError(err)) {
+      console.warn(`[API] ${getApiBase()} unavailable. Using OFFLINE DEMO draft for tab '${tab}'.`);
+      await sleep(OFFLINE_MOCK_LATENCY_MS);
+      const mock = normalizeTabDraft(tab, getMockDraft(tab, trainingId, target), {
+        source: 'offline-mock',
+        target: target ? { ...target } : null,
+      });
+      LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = mock as unknown as TabDraftResponse;
+      return mock as TabDraftResponse<T>;
     }
     throw err;
   }
 }
 
+/**
+ * After a client timeout the backend keeps processing and saves the finished
+ * draft in its own cache. Poll the draft endpoint so a long real generation
+ * is harvested instead of lost. Only backend drafts are accepted — a stale
+ * local/offline-mock entry must never masquerade as the live result.
+ */
+export const TIMEOUT_POLL_INTERVAL_MS = 10_000;
+export const TIMEOUT_POLL_DEADLINE_MS = 600_000;
+
+export async function pollBackendDraftAfterTimeout<T = any>(
+  tab: TabName,
+  trainingId: string,
+  opts?: { intervalMs?: number; deadlineMs?: number }
+): Promise<TabDraftResponse<T> | null> {
+  const interval = opts?.intervalMs ?? TIMEOUT_POLL_INTERVAL_MS;
+  const deadline = Date.now() + (opts?.deadlineMs ?? TIMEOUT_POLL_DEADLINE_MS);
+  while (Date.now() < deadline) {
+    await sleep(interval);
+    try {
+      const cached = await getCachedDraft<T>(tab, trainingId);
+      if (cached && cached.source === 'backend' && cached.tab === tab) {
+        return cached;
+      }
+    } catch {
+      // Transient polling errors are not fatal; keep waiting for the backend.
+    }
+  }
+  return null;
+}
+
+/**
+ * Retrieve the latest cached AI suggestion draft for a tab from the backend's
+ * in-memory cache; falls back to the local in-session cache when absent.
+ */
+export async function getCachedDraft<T = any>(
+  tab: TabName,
+  trainingId: string
+): Promise<TabDraftResponse<T> | null> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DRAFT_TIMEOUT_MS);
+
+    const response = await fetch(
+      `${getApiBase()}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(trainingId)}`,
+      {
+        method: 'GET',
+        headers: defaultHeaders(),
+        signal: controller.signal,
+      }
+    );
+
+    clearTimeout(timeoutId);
+
+    if (response.status === 404) {
+      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+    }
+
+    if (!response.ok) {
+      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+    }
+
+    const result = await response.json();
+    const normalized = normalizeTabDraft(tab, result, { source: 'backend' });
+    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = normalized as TabDraftResponse;
+    return normalized as TabDraftResponse<T>;
+  } catch (err) {
+    return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+  }
+}
+
+/**
+ * Read-only training structure: the actual modules and lessons of one
+ * training from `GET /v1/curriculum/{training_id}/structure`.
+ *
+ * Unlike draft generation there is deliberately NO offline fallback here:
+ * content targets must be real database records. On any failure the caller
+ * receives a thrown Error and must prevent invalid target submission.
+ */
+export async function getTrainingStructure(
+  trainingId: string
+): Promise<BackendTrainingStructure> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DRAFT_TIMEOUT_MS);
+
+    const response = await fetch(
+      `${getApiBase()}/v1/curriculum/${encodeURIComponent(trainingId)}/structure`,
+      {
+        method: 'GET',
+        headers: defaultHeaders(),
+        signal: controller.signal,
+      }
+    );
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const message = extractBackendErrorMessage(response.status, errorData);
+      const err = new Error(message);
+      (err as any).status = response.status;
+      throw err;
+    }
+
+    const body = (await response.json()) as BackendTrainingStructure;
+    if (body?.training_id !== trainingId || !Array.isArray(body?.modules)) {
+      throw new Error(
+        'Training structure response does not match the requested training.'
+      );
+    }
+    return body;
+  } catch (err: unknown) {
+    // No mock fallback for structure data — surface a clear, actionable error.
+    if (isBackendUnreachableError(err)) {
+      throw new Error(
+        `AI backend is unreachable at ${getApiBase()}. ` +
+          'Start the backend to load real content targets.'
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Lightweight reachability probe against the public /health endpoint.
+ * No auth headers required (health is public); returns true when the
+ * backend answers. Used by the app shell to warn when AI suggestions
+ * would come from the offline demo generator instead of the backend.
+ */
+export async function pingBackend(timeoutMs = 5000): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(`${getApiBase()}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Curriculum Designer Copilot interactive API (from main's copilot
+// integration, adapted to this client's conventions in src/api/copilot.ts).
+export type {
+  CopilotChoiceOption,
+  CopilotClarification,
+  DesignerCopilotRequest,
+  DesignerCopilotResponse,
+} from './copilot';
+export { sendDesignerCopilotTurn, COPILOT_TIMEOUT_MS } from './copilot';

@@ -1,24 +1,20 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
-import { ClipboardList, Plus, Eye, Edit2, Sparkles, RefreshCw, CheckCircle2, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, SurveyDraftData } from '../../api/tabs';
+import { ClipboardList, Plus, Eye, Edit2, Sparkles, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, SurveyDraftData, getActiveTrainingId } from '../../api/tabs';
+import { normalizeTabDraft } from '../../api/adapters';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface SurveyTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  /** Draft pushed by the Curriculum Copilot (backend-shape payload). */
   suggestedDraft?: any;
   onDismissDraft?: () => void;
 }
 
-export const SurveyTab: React.FC<SurveyTabProps> = ({
-  data,
-  onUpdateData,
-  suggestedDraft,
-  onDismissDraft,
-}) => {
+export const SurveyTab: React.FC<SurveyTabProps> = ({ data, onUpdateData, suggestedDraft, onDismissDraft }) => {
   const [surveys, setSurveys] = useState(data.surveys || []);
-  const [expandedSurveys, setExpandedSurveys] = useState<Record<string, boolean>>({});
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newSurveyName, setNewSurveyName] = useState('');
   const [newSurveyDesc, setNewSurveyDesc] = useState('');
@@ -28,57 +24,33 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<SurveyDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-
-  // Sync surveys state with parent props
-  useEffect(() => {
-    if (data.surveys) {
-      setSurveys(data.surveys);
-    }
-  }, [data.surveys]);
-
-  // Deduplicate surveys and normalize fields
-  const displaySurveys = useMemo(() => {
-    const seen = new Set<string>();
-    return (surveys || []).filter((s: any) => {
-      const title = s.name || s.title || '';
-      const promptList = (s.questions || [])
-        .map((q: any) => q.prompt || q.question || q.title || '')
-        .join('|');
-      const key = `${title}::${promptList}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [surveys]);
-
-  const toggleExpand = (id: string) => {
-    setExpandedSurveys((prev) => ({
-      ...prev,
-      [id]: prev[id] === undefined ? false : !prev[id],
-    }));
-  };
-
-  // Sync draft from Copilot
-  useEffect(() => {
-    if (suggestedDraft?.sections?.length || suggestedDraft?.questions?.length) {
-      setAiDraft({
-        status: 'success',
-        tab: 'survey',
-        data: suggestedDraft,
-        model: 'gemma4:31b-cloud',
-      });
-    }
-  }, [suggestedDraft]);
+  const trainingId = getActiveTrainingId(data.training?.id);
 
   // Check cached draft on mount
   useEffect(() => {
     getCachedDraft<SurveyDraftData>('survey', trainingId).then((draft) => {
-      if (draft && (draft.data?.sections?.length || draft.data?.questions?.length)) {
+      if (draft && draft.data?.questions?.length) {
         setAiDraft(draft);
       }
     });
   }, [trainingId]);
+
+  // Sync draft pushed by the Curriculum Copilot (backend-shape payload).
+  // Normalized through the same adapter pipeline, so validation and labeling
+  // apply; an unusable copilot payload is never rendered.
+  useEffect(() => {
+    if (!suggestedDraft) return;
+    try {
+      const normalized = normalizeTabDraft(
+        'survey',
+        { status: 'success', tab: 'survey', data: suggestedDraft },
+        { source: 'backend' }
+      );
+      setAiDraft(normalized as TabDraftResponse<SurveyDraftData>);
+    } catch {
+      // DraftValidationError: unusable payload — no empty card, no error spam.
+    }
+  }, [suggestedDraft]);
 
   const handleGenerate = async () => {
     // Prerequisite check from guide: Modules must exist
@@ -86,6 +58,7 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({
       setErrorMessage('Please generate/save the earlier tab first (Modules must exist before creating surveys).');
       return;
     }
+    if (isGenerating) return; // Prevent duplicate submissions
 
     setIsGenerating(true);
     setErrorMessage(null);
@@ -100,55 +73,23 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({
   };
 
   const handleApplyDraft = () => {
-    if (!aiDraft?.data) return;
-
-    if (aiDraft.data.sections && aiDraft.data.sections.length > 0) {
-      const generatedSurveys = aiDraft.data.sections.map((sec, idx) => ({
-        id: `survey-ai-sec-${idx}-${Date.now()}`,
-        name: sec.title,
-        title: sec.title,
-        type: 'POST_TRAINING',
-        description: `${sec.questions.length}-question survey section generated by ${aiDraft.model || 'AI'}.`,
-        sectionCount: sec.questions.length,
-        questions: sec.questions.map((q: any) => ({
-          prompt: q.prompt || q.question || q.title || 'Feedback question',
-          question: q.prompt || q.question || q.title || 'Feedback question',
-          type: q.type || 'MULTIPLE_CHOICE',
-          options: q.options || [],
-        })),
-      }));
-      setSurveys(generatedSurveys);
-      if (onUpdateData) {
-        onUpdateData({ ...data, surveys: generatedSurveys });
-      }
-      setAiDraft(null);
-      if (onDismissDraft) onDismissDraft();
-      return;
-    }
-
-    if (aiDraft.data.questions && aiDraft.data.questions.length > 0) {
+    if (aiDraft?.data?.questions) {
       const newSurvey = {
         id: `survey-ai-${Date.now()}`,
         name: 'AI Generated Learner Experience & Feedback Survey',
-        title: 'AI Generated Learner Experience & Feedback Survey',
         type: 'POST_TRAINING',
-        description: `Standardized ${aiDraft.data.questions.length}-item feedback survey generated by ${aiDraft.model || 'AI'}.`,
+        description: `Standardized ${aiDraft.data.questions.length}-item learner-experience feedback survey generated by ${aiDraft.model || 'gemma4:31b-cloud'}.`,
         sectionCount: 1,
-        questions: aiDraft.data.questions.map((q: any) => ({
-          prompt: q.prompt || q.question || q.title || 'Feedback question',
-          question: q.prompt || q.question || q.title || 'Feedback question',
-          type: q.type || 'MULTIPLE_CHOICE',
-          options: q.options || [],
-        })),
+        questions: aiDraft.data.questions,
       };
 
-      const updated = [newSurvey as any];
+      const updated = [newSurvey as any, ...surveys];
       setSurveys(updated);
       if (onUpdateData) {
         onUpdateData({ ...data, surveys: updated });
       }
       setAiDraft(null);
-      if (onDismissDraft) onDismissDraft();
+      onDismissDraft?.();
     }
   };
 
@@ -194,7 +135,7 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Generate Survey with AI'}</span>
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Generate Survey with AI'}</span>
           </button>
 
           {/* Manual Create Button */}
@@ -214,199 +155,106 @@ export const SurveyTab: React.FC<SurveyTabProps> = ({
       )}
 
       {/* AI Draft Suggestion Box */}
-      {aiDraft && (aiDraft.data?.sections || aiDraft.data?.questions) && (
+      {aiDraft && aiDraft.data?.questions && (
         <AiDraftCard
           title="Suggested Learner Feedback Survey"
-          model={aiDraft.model || 'mimo-v2.6-flash'}
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
+          warnings={aiDraft.warnings}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => {
             setAiDraft(null);
-            if (onDismissDraft) onDismissDraft();
+            onDismissDraft?.();
           }}
           onRegenerate={handleGenerate}
         >
-          {aiDraft.data.sections ? (
-            <div className="space-y-4 max-h-[360px] overflow-y-auto pr-2">
-              <p className="text-xs text-gray-500">
-                The AI generated {aiDraft.data.sections.length} survey sections covering learner feedback, course relevance, and delivery:
-              </p>
-              {aiDraft.data.sections.map((sec, sIdx) => (
-                <div key={sIdx} className="border border-indigo-100 rounded-lg p-3 bg-white space-y-2">
-                  <h4 className="font-semibold text-xs text-indigo-900 flex items-center justify-between">
-                    <span>{sec.title}</span>
-                    <span className="text-[10px] text-gray-400 font-normal">({sec.questions.length} questions)</span>
-                  </h4>
-                  <div className="space-y-1.5">
-                    {sec.questions.map((q, qIdx) => (
-                      <div key={qIdx} className="p-2 bg-gray-50 rounded border border-gray-100 text-xs text-gray-800">
-                        <p className="font-medium text-gray-900">{q.prompt || q.question}</p>
-                        <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-500">
-                          <span className="px-1.5 py-0.5 rounded bg-gray-200 font-mono text-[9px]">{q.type}</span>
-                          {q.options && q.options.length > 0 && (
-                            <span>{q.options.length} options ({q.options.slice(0, 3).join(', ')}{q.options.length > 3 ? '...' : ''})</span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500">
+              The AI generated {aiDraft.data.questions.length} learner-experience feedback items (delivery clarity, pace, and lab effectiveness):
+            </p>
+            <div className="space-y-2">
+              {aiDraft.data.questions.map((q, idx) => (
+                <div key={idx} className="p-2.5 bg-gray-50 rounded border border-gray-200 flex items-start gap-2.5 text-xs text-gray-800">
+                  <span className="font-bold text-indigo-600 min-w-[20px]">{q.order}.</span>
+                  <div className="flex-1">
+                    <p className="font-medium text-gray-900">{q.question}</p>
+                    <span className="text-[10px] text-gray-400 font-mono uppercase">
+                      {q.type === 'TEXT'
+                        ? 'Open response'
+                        : `${q.type}${q.options?.length ? ` · ${q.options.length} options` : ''}`}
+                      {q.sectionTitle ? ` · ${q.sectionTitle}` : ''}
+                    </span>
+                    {q.options && q.options.length > 0 && (
+                      <ul className="mt-1.5 space-y-0.5 text-[11px] text-gray-600 list-disc list-inside">
+                        {q.options.map((opt, oi) => (
+                          <li key={oi}>{opt}</li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-gray-500">
-                The AI generated {aiDraft.data.questions?.length || 0} feedback items:
-              </p>
-              <div className="space-y-2">
-                {aiDraft.data.questions?.map((q, idx) => (
-                  <div key={idx} className="p-2.5 bg-gray-50 rounded border border-gray-200 flex items-start gap-2.5 text-xs text-gray-800">
-                    <span className="font-bold text-indigo-600 min-w-[20px]">{q.order || idx + 1}.</span>
-                    <div className="flex-1">
-                      <p className="font-medium text-gray-900">{q.prompt || q.question}</p>
-                      <span className="text-[10px] text-gray-400 font-mono uppercase">Scale: 1-5 {q.type}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          </div>
         </AiDraftCard>
       )}
 
       {/* Existing Surveys List */}
       <div className="space-y-4">
-        {displaySurveys.map((survey: any, sIdx: number) => {
-          const sTitle = survey.name || survey.title || `Survey Section ${sIdx + 1}`;
-          const qList = (survey.questions || [])
-            .map((q: any) => ({
-              prompt: q.prompt || q.question || q.title || '',
-              type: q.type || 'MULTIPLE_CHOICE',
-              options: q.options || [],
-            }))
-            .filter((q: any) => q.prompt);
-
-          const isExpanded = expandedSurveys[survey.id || `s-${sIdx}`] ?? true;
-
-          return (
-            <div
-              key={survey.id || sIdx}
-              className="border border-[#CED4DA] rounded-xl p-5 bg-white shadow-xs hover:border-brand/50 transition-all group"
-            >
-              <div className="flex justify-between items-start gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <h3 className="text-base font-bold text-gray-900 group-hover:text-brand transition-colors">
-                      {sTitle}
-                    </h3>
-                    <span className="px-2.5 py-0.5 bg-blue-50 text-blue-700 text-xs rounded-full font-semibold border border-blue-200 shrink-0">
-                      {survey.type || 'POST_TRAINING'}
-                    </span>
-                    <span className="px-2.5 py-0.5 bg-purple-50 text-purple-700 text-xs rounded-full font-medium border border-purple-200 shrink-0">
-                      {qList.length > 0 ? `${qList.length} Questions` : `${survey.sectionCount || 6} Items`}
-                    </span>
-                  </div>
-
-                  {survey.description && (
-                    <p className="text-gray-600 text-sm mb-3 leading-relaxed">
-                      {survey.description}
-                    </p>
-                  )}
-
-                  {qList.length > 0 ? (
-                    <div className="mt-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-center gap-1.5">
-                          <HelpCircle className="w-3.5 h-3.5 text-indigo-500" />
-                          <span>Survey Questions ({qList.length})</span>
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => toggleExpand(survey.id || `s-${sIdx}`)}
-                          className="text-xs text-brand hover:text-blue-700 font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                        >
-                          <span>{isExpanded ? 'Collapse' : 'Expand all'}</span>
-                          {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-
-                      {isExpanded && (
-                        <div className="space-y-2.5 pt-1">
-                          {qList.map((q: any, qi: number) => (
-                            <div
-                              key={qi}
-                              className="p-3 bg-gray-50/80 rounded-lg border border-gray-200/80 text-xs space-y-2 hover:bg-gray-50 transition-colors"
-                            >
-                              <div className="flex items-start gap-2.5 justify-between">
-                                <div className="flex items-start gap-2 flex-1">
-                                  <span className="font-bold text-indigo-600 min-w-[22px] bg-indigo-50 rounded px-1.5 py-0.5 text-[11px] text-center border border-indigo-100">
-                                    Q{qi + 1}
-                                  </span>
-                                  <p className="font-semibold text-gray-900 leading-snug">
-                                    {q.prompt}
-                                  </p>
-                                </div>
-                                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium shrink-0 bg-white border border-gray-200 text-gray-600 uppercase">
-                                  {q.type === 'MULTIPLE_CHOICE' ? 'Multiple Choice' : q.type === 'TEXT' ? 'Open Text' : q.type}
-                                </span>
-                              </div>
-
-                              {q.options && q.options.length > 0 ? (
-                                <div className="flex flex-wrap gap-1.5 pt-1 pl-7">
-                                  {q.options.map((opt: string, oi: number) => (
-                                    <span
-                                      key={oi}
-                                      className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] bg-white text-gray-700 border border-gray-200 font-medium shadow-2xs"
-                                    >
-                                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mr-1.5 shrink-0" />
-                                      {opt}
-                                    </span>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="pl-7 text-[11px] text-gray-500 italic flex items-center gap-1.5">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-gray-400 shrink-0" />
-                                  <span>Learner free-text response field</span>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="mt-2 text-xs text-gray-500 italic bg-gray-50 p-2.5 rounded border border-gray-100 flex items-center gap-2">
-                      <ClipboardList className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                      <span>{survey.sectionCount || 6} feedback items configured in this survey.</span>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-3 pt-2 border-t border-gray-100">
-                    <div className="flex items-center gap-1.5">
-                      <ClipboardList className="h-4 w-4 text-gray-400" />
-                      <span>{qList.length > 0 ? `${qList.length} items configured` : `${survey.sectionCount || 6} sections / items`}</span>
-                    </div>
-                  </div>
+        {surveys.map((survey: any) => (
+          <div
+            key={survey.id}
+            className="border-[0.5px] border-[#CED4DA] rounded-lg p-5 bg-white hover:border-brand/50 transition-all group"
+          >
+            <div className="flex justify-between items-start gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="text-base font-semibold text-gray-900 truncate group-hover:text-brand transition-colors">
+                    {survey.name}
+                  </h3>
+                  <span className="px-2.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full font-medium shrink-0">
+                    {survey.type}
+                  </span>
                 </div>
+                <p className="text-gray-600 text-sm mb-3 leading-relaxed line-clamp-2">
+                  {survey.description}
+                </p>
 
-                <div className="flex gap-1 shrink-0 opacity-80 group-hover:opacity-100 transition-opacity">
-                  <button
-                    title="Preview survey"
-                    className="p-1.5 text-gray-500 hover:text-brand hover:bg-blue-50 rounded-md transition-colors"
-                  >
-                    <Eye className="w-4 h-4" />
-                  </button>
-                  <button
-                    title="Edit survey"
-                    className="p-1.5 text-gray-500 hover:text-brand hover:bg-blue-50 rounded-md transition-colors"
-                  >
-                    <Edit2 className="w-4 h-4" />
-                  </button>
+                {survey.questions && (
+                  <div className="mb-3 space-y-1 bg-gray-50 p-2.5 rounded border border-gray-100 text-xs text-gray-700">
+                    <span className="font-semibold block text-gray-800">Questions:</span>
+                    {survey.questions.map((q: any, qi: number) => (
+                      <p key={qi} className="text-gray-600 truncate">• {q.question}</p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-3 text-xs text-gray-500">
+                  <div className="flex items-center gap-1.5">
+                    <ClipboardList className="h-4 w-4 text-gray-400" />
+                    <span>{survey.sectionCount || survey.questions?.length || 6} sections / items</span>
+                  </div>
                 </div>
               </div>
+
+              <div className="flex gap-1 shrink-0 opacity-80 group-hover:opacity-100 transition-opacity">
+                <button
+                  title="Preview survey"
+                  className="p-1.5 text-gray-500 hover:text-brand hover:bg-blue-50 rounded-md transition-colors"
+                >
+                  <Eye className="w-4 h-4" />
+                </button>
+                <button
+                  title="Edit survey"
+                  className="p-1.5 text-gray-500 hover:text-brand hover:bg-blue-50 rounded-md transition-colors"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-          );
-        })}
+          </div>
+        ))}
       </div>
 
       {isCreateOpen && (

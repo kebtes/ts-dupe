@@ -1,22 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, MoreVertical, Eye, CheckCircle2, Sparkles, RefreshCw, HelpCircle } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, AssessmentDraftData } from '../../api/tabs';
+import { Plus, MoreVertical, Eye, CheckCircle2, Sparkles, RefreshCw, HelpCircle, AlertCircle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, AssessmentDraftData, getActiveTrainingId } from '../../api/tabs';
+import { normalizeTabDraft } from '../../api/adapters';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface AssessmentTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  /** Draft pushed by the Curriculum Copilot (backend-shape payload). */
   suggestedDraft?: any;
   onDismissDraft?: () => void;
 }
 
-export const AssessmentTab: React.FC<AssessmentTabProps> = ({
-  data,
-  onUpdateData,
-  suggestedDraft,
-  onDismissDraft,
-}) => {
+export const AssessmentTab: React.FC<AssessmentTabProps> = ({ data, onUpdateData, suggestedDraft, onDismissDraft }) => {
   const [assessments, setAssessments] = useState(data.assessments || []);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [name, setName] = useState('');
@@ -27,28 +24,32 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<AssessmentDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-
-  // Sync draft from Copilot
-  useEffect(() => {
-    if (suggestedDraft?.sections?.length || suggestedDraft?.questions?.length) {
-      setAiDraft({
-        status: 'success',
-        tab: 'assessment',
-        data: suggestedDraft,
-        model: 'gemma4:31b-cloud',
-      });
-    }
-  }, [suggestedDraft]);
+  const trainingId = getActiveTrainingId(data.training?.id);
 
   // Check cached draft on mount
   useEffect(() => {
     getCachedDraft<AssessmentDraftData>('assessment', trainingId).then((draft) => {
-      if (draft && (draft.data?.questions?.length || draft.data?.sections?.length)) {
+      if (draft && draft.data?.questions?.length) {
         setAiDraft(draft);
       }
     });
   }, [trainingId]);
+
+  // Sync draft pushed by the Curriculum Copilot (backend-shape payload),
+  // normalized through the same adapter/validation pipeline.
+  useEffect(() => {
+    if (!suggestedDraft) return;
+    try {
+      const normalized = normalizeTabDraft(
+        'assessment',
+        { status: 'success', tab: 'assessment', data: suggestedDraft },
+        { source: 'backend' }
+      );
+      setAiDraft(normalized as TabDraftResponse<AssessmentDraftData>);
+    } catch {
+      // DraftValidationError: unusable payload — no empty card, no error spam.
+    }
+  }, [suggestedDraft]);
 
   const handleGenerate = async () => {
     // Prerequisite check from guide: Modules and lessons must exist
@@ -56,6 +57,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
       setErrorMessage('Please generate/save the earlier tab first (Modules and lessons must exist before generating assessments).');
       return;
     }
+    if (isGenerating) return; // Prevent duplicate submissions
 
     setIsGenerating(true);
     setErrorMessage(null);
@@ -70,37 +72,18 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
   };
 
   const handleApplyDraft = () => {
-    if (!aiDraft?.data) return;
-
-    let allQuestions: any[] = [];
-    if (aiDraft.data.sections && aiDraft.data.sections.length > 0) {
-      aiDraft.data.sections.forEach((sec) => {
-        allQuestions.push(
-          ...sec.questions.map((q) => ({
-            ...q,
-            sectionTitle: sec.title,
-          }))
-        );
-      });
-    } else if (aiDraft.data.questions && aiDraft.data.questions.length > 0) {
-      allQuestions = aiDraft.data.questions;
-    }
-
-    if (allQuestions.length > 0) {
-      const newAssessments = allQuestions.map((q, idx) => {
-        const promptText = q.prompt || q.question || `Question ${idx + 1}`;
-        return {
-          id: `ass-ai-${idx}-${Date.now()}`,
-          name: `AI Quiz: ${promptText.slice(0, 50)}...`,
-          type: q.type || 'MCQ_QUIZ',
-          target: 'INDIVIDUAL',
-          weight: q.weight || Math.round(100 / (allQuestions.length || 1)),
-          assignedTo: 'All Cohorts',
-          cohort: 'Residency Cohort 1',
-          approvalStatus: 'APPROVED',
-          mcqDetails: q,
-        };
-      });
+    if (aiDraft?.data?.questions) {
+      const newAssessments = aiDraft.data.questions.map((q, idx) => ({
+        id: `ass-ai-${idx}-${Date.now()}`,
+        name: `AI Quiz: ${q.question.slice(0, 50)}...`,
+        type: 'MCQ_QUIZ',
+        target: 'INDIVIDUAL',
+        weight: Math.round(100 / (aiDraft.data.questions.length || 1)),
+        assignedTo: 'All Cohorts',
+        cohort: 'Residency Cohort 1',
+        approvalStatus: 'APPROVED',
+        mcqDetails: q,
+      }));
 
       const updated = [...newAssessments as any, ...assessments];
       setAssessments(updated);
@@ -108,7 +91,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
         onUpdateData({ ...data, assessments: updated });
       }
       setAiDraft(null);
-      if (onDismissDraft) onDismissDraft();
+      onDismissDraft?.();
     }
   };
 
@@ -156,7 +139,7 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Generate Quizzes with AI'}</span>
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Generate Quizzes with AI'}</span>
           </button>
 
           {/* Manual Add Button */}
@@ -176,124 +159,147 @@ export const AssessmentTab: React.FC<AssessmentTabProps> = ({
       )}
 
       {/* AI Draft Suggestion Box */}
-      {aiDraft && (aiDraft.data?.sections || aiDraft.data?.questions) && (
+      {aiDraft && aiDraft.data?.questions && (
         <AiDraftCard
-          title="Suggested MCQs & Assessments"
-          model={aiDraft.model || 'mimo-v2.6-flash'}
+          title="Suggested Assessments & Module Rubrics"
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
+          warnings={aiDraft.warnings}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => {
             setAiDraft(null);
-            if (onDismissDraft) onDismissDraft();
+            onDismissDraft?.();
           }}
           onRegenerate={handleGenerate}
         >
-          {aiDraft.data.sections ? (
-            <div className="space-y-4 max-h-[380px] overflow-y-auto pr-2">
-              <p className="text-xs text-gray-500">
-                The AI generated assessment sections containing modular evaluation items:
-              </p>
-              {aiDraft.data.sections.map((sec, sIdx) => (
-                <div key={sIdx} className="border border-indigo-100 rounded-lg p-3 bg-white space-y-3">
-                  <h4 className="font-semibold text-xs text-indigo-900 flex items-center justify-between">
-                    <span>{sec.title}</span>
-                    <span className="text-[10px] text-gray-400 font-normal">({sec.questions.length} questions)</span>
-                  </h4>
-                  <div className="space-y-3">
-                    {sec.questions.map((q, qIdx) => (
-                      <div key={qIdx} className="p-3 bg-gray-50 rounded-lg border border-gray-100 space-y-2 text-xs">
-                        <div className="flex items-start gap-2">
-                          <HelpCircle className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
-                          <p className="font-bold text-gray-900 text-sm">{q.prompt || q.question}</p>
-                        </div>
-                        {q.options && Array.isArray(q.options) && (
-                          <div className="space-y-1.5 pl-6">
-                            {q.options.map((opt: any, oi: number) => {
-                              const text = typeof opt === 'string' ? opt : opt.text;
-                              const isCorrect = typeof opt === 'object' && opt.is_correct !== undefined ? opt.is_correct : (q.correct_answer && q.correct_answer === text);
-                              const rationale = typeof opt === 'object' ? opt.rationale : null;
-                              return (
-                                <div
-                                  key={oi}
-                                  className={`p-2 rounded border transition-colors ${
-                                    isCorrect
-                                      ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 font-medium'
-                                      : 'bg-white border-gray-200 text-gray-700'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span>{text}</span>
-                                    {isCorrect && (
-                                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
-                                        CORRECT
-                                      </span>
-                                    )}
-                                  </div>
-                                  {rationale && (
-                                    <p className="text-[11px] text-gray-500 mt-0.5 italic">
-                                      Rationale: {rationale}
-                                    </p>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+          <div className="space-y-4">
+            {/* Uncovered lessons warning from the backend envelope */}
+            {aiDraft.uncovered_lessons && aiDraft.uncovered_lessons.length > 0 && (
+              <div className="flex items-start gap-2.5 border border-amber-300 bg-amber-50 text-amber-900 rounded-lg p-3 text-xs">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold uppercase tracking-wide">Lessons without lesson-linked content</p>
+                  <p className="mt-0.5">
+                    These recorded lessons have no lesson-linked content item,
+                    so their assessment coverage may be limited (they can only
+                    be assessed on their recorded topic): {aiDraft.uncovered_lessons.join(', ')}.
+                  </p>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <p className="text-xs text-gray-500">
-                The AI generated {aiDraft.data.questions?.length || 0} multiple-choice question(s) complete with options and answer rationales:
-              </p>
-              <div className="space-y-3">
-                {aiDraft.data.questions?.map((q, idx) => (
-                  <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2.5 text-xs">
-                    <div className="flex items-start gap-2">
-                      <HelpCircle className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
-                      <p className="font-bold text-gray-900 text-sm">{q.prompt || q.question}</p>
-                    </div>
+              </div>
+            )}
 
-                    <div className="space-y-1.5 pl-6">
-                      {q.options?.map((opt: any, oi: number) => {
-                        const text = typeof opt === 'string' ? opt : opt.text;
-                        const isCorrect = typeof opt === 'object' && opt.is_correct !== undefined ? opt.is_correct : (q.correct_answer && q.correct_answer === text);
-                        const rationale = typeof opt === 'object' ? opt.rationale : null;
-                        return (
+            <p className="text-xs text-gray-500">
+              The AI generated {aiDraft.data.questions.length} assessment question(s); the correct answer is
+              marked. It also produced {aiDraft.data.module_rubrics.length} module rubric(s).
+            </p>
+
+            <div className="space-y-3">
+              {aiDraft.data.questions.map((q, idx) => (
+                <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2.5 text-xs">
+                  <div className="flex items-start gap-2">
+                    <HelpCircle className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                    <p className="font-bold text-gray-900 text-sm">{q.question}</p>
+                  </div>
+                  <span className="ml-6 text-[10px] text-gray-400 font-mono uppercase">
+                    {q.type}
+                    {typeof q.weight === 'number' ? ` · weight ${q.weight}` : ''}
+                    {q.sectionTitle ? ` · ${q.sectionTitle}` : ''}
+                  </span>
+
+                  {q.type.toUpperCase() === 'RUBRIC' && q.rubric ? (
+                    <div className="ml-6 p-2.5 bg-indigo-50/70 border border-indigo-100 rounded space-y-1.5">
+                      <p className="text-[11px] font-semibold text-indigo-900">Criteria: {q.rubric.criteria}</p>
+                      {q.rubric.performance_levels.map((lvl, li) => (
+                        <div key={li} className="text-[11px] text-gray-700">
+                          <span className="font-semibold">{lvl.level}</span> ({lvl.points} pts) — {lvl.description}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    q.options.length > 0 && (
+                      <div className="space-y-1.5 ml-6">
+                        {q.options.map((opt, oi) => (
                           <div
                             key={oi}
                             className={`p-2 rounded border transition-colors ${
-                              isCorrect
+                              opt.is_correct
                                 ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 font-medium'
                                 : 'bg-white border-gray-200 text-gray-700'
                             }`}
                           >
                             <div className="flex items-center justify-between">
-                              <span>{text}</span>
-                              {isCorrect && (
+                              <span>{opt.text}</span>
+                              {opt.is_correct && (
                                 <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
                                   CORRECT
                                 </span>
                               )}
                             </div>
-                            {rationale && (
-                              <p className="text-[11px] text-gray-500 mt-0.5 italic">
-                                Rationale: {rationale}
-                              </p>
-                            )}
                           </div>
-                        );
-                      })}
+                        ))}
+                      </div>
+                    )
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Module Rubrics (one per generated module, preserved from the backend) */}
+            {aiDraft.data.module_rubrics.length > 0 && (
+              <div className="pt-2 border-t border-gray-200 space-y-3">
+                <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider">
+                  Module Rubrics ({aiDraft.data.module_rubrics.length})
+                </h4>
+                <p className="text-[11px] text-gray-500">
+                  One grading rubric per generated module, derived from its practical assignment.
+                </p>
+                {aiDraft.data.module_rubrics.map((rubric, ri) => (
+                  <div key={ri} className="p-3.5 bg-indigo-50/60 border border-indigo-200 rounded-lg space-y-2 text-xs">
+                    <div className="flex items-center justify-between flex-wrap gap-1">
+                      <h5 className="font-bold text-gray-900 text-sm">{rubric.module_title}</h5>
+                      <span className="text-[10px] font-mono bg-white text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
+                        {rubric.source}
+                      </span>
+                    </div>
+                    {rubric.practical_assignment_title && (
+                      <p className="text-[11px] text-gray-700">
+                        <strong>Practical assignment:</strong> {rubric.practical_assignment_title}
+                      </p>
+                    )}
+                    {rubric.linked_objectives?.length > 0 && (
+                      <p className="text-[11px] text-gray-700">
+                        <strong>Linked objectives:</strong> {rubric.linked_objectives.join(' | ')}
+                      </p>
+                    )}
+                    <p className="text-[11px] text-gray-700">
+                      <strong>Criteria:</strong> {rubric.criteria}
+                    </p>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-[11px] border border-indigo-100 bg-white rounded">
+                        <thead>
+                          <tr className="bg-indigo-50 text-indigo-900">
+                            <th className="px-2 py-1 text-left border-b border-indigo-100">Level</th>
+                            <th className="px-2 py-1 text-left border-b border-indigo-100">Points</th>
+                            <th className="px-2 py-1 text-left border-b border-indigo-100">Description</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rubric.performance_levels.map((lvl, li) => (
+                            <tr key={li} className="border-b border-indigo-50 last:border-b-0">
+                              <td className="px-2 py-1 font-semibold text-gray-900">{lvl.level}</td>
+                              <td className="px-2 py-1 text-gray-700">{lvl.points}</td>
+                              <td className="px-2 py-1 text-gray-600">{lvl.description}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </AiDraftCard>
       )}
 

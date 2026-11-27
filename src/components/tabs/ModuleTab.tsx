@@ -1,53 +1,54 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TrainingData } from '../../types';
-import { ChevronDown, MoreVertical, Plus, BookOpen, Sparkles, RefreshCw, Layers } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, ModuleDraftData } from '../../api/tabs';
+import { ChevronDown, MoreVertical, Plus, BookOpen, Sparkles, RefreshCw, Layers, AlertTriangle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ModuleDraftData, getActiveTrainingId } from '../../api/tabs';
+import { normalizeTabDraft, uiModulesFromStructure, type UiModuleRecord } from '../../api/adapters';
+import { useTrainingStructure } from '../../api/useTrainingStructure';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface ModuleTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  /** Opens the Curriculum Copilot drawer for this tab. */
   onOpenCopilot?: () => void;
+  /** Draft pushed by the Curriculum Copilot (backend-shape payload). */
   suggestedDraft?: any;
   onDismissDraft?: () => void;
 }
 
-export const ModuleTab: React.FC<ModuleTabProps> = ({
-  data,
-  onUpdateData,
-  onOpenCopilot,
-  suggestedDraft,
-  onDismissDraft,
-}) => {
+export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData, onOpenCopilot, suggestedDraft, onDismissDraft }) => {
   const [modules, setModules] = useState(data.modules || []);
-
-  useEffect(() => {
-    if (data.modules) {
-      setModules(data.modules);
-    }
-  }, [data.modules]);
   const [openModuleId, setOpenModuleId] = useState<string | null>(modules[0]?.id || null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newModuleName, setNewModuleName] = useState('');
   const [newModuleDesc, setNewModuleDesc] = useState('');
 
+  const trainingId = getActiveTrainingId(data.training?.id);
+  const {
+    structure,
+    loading: structureLoading,
+    error: structureError,
+    retry: retryStructure,
+  } = useTrainingStructure(trainingId);
+
+  // Swap the mock demo list for the real TSP modules once the structure
+  // loads — but never clobber modules the user added/applied in-session.
+  const userEditedRef = useRef(false);
+  useEffect(() => {
+    if (!structure) return;
+    if (userEditedRef.current) return;
+    const real: UiModuleRecord[] = uiModulesFromStructure(structure);
+    if (real.length > 0) {
+      setModules(real as any);
+      setOpenModuleId((current) =>
+        real.some((m) => m.id === current) ? current : real[0].id
+      );
+    }
+  }, [structure]);
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<ModuleDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
-
-  // Listen to Copilot or parent suggested drafts
-  useEffect(() => {
-    if (suggestedDraft?.modules?.length) {
-      setAiDraft({
-        status: 'success',
-        tab: 'module',
-        data: suggestedDraft,
-        model: 'gemma4:31b-cloud',
-      });
-    }
-  }, [suggestedDraft]);
 
   // Check cached draft on mount
   useEffect(() => {
@@ -57,6 +58,22 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
       }
     });
   }, [trainingId]);
+
+  // Sync draft pushed by the Curriculum Copilot (backend-shape payload),
+  // normalized through the same adapter/validation pipeline.
+  useEffect(() => {
+    if (!suggestedDraft) return;
+    try {
+      const normalized = normalizeTabDraft(
+        'module',
+        { status: 'success', tab: 'module', data: suggestedDraft },
+        { source: 'backend' }
+      );
+      setAiDraft(normalized as TabDraftResponse<ModuleDraftData>);
+    } catch {
+      // DraftValidationError: unusable payload — no empty card, no error spam.
+    }
+  }, [suggestedDraft]);
 
   const toggleModule = (id: string) => {
     setOpenModuleId(openModuleId === id ? null : id);
@@ -68,6 +85,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
       setErrorMessage('Please generate/save the earlier tab first (Training Profile scope must exist).');
       return;
     }
+    if (isGenerating) return; // Prevent duplicate submissions
 
     setIsGenerating(true);
     setErrorMessage(null);
@@ -83,26 +101,26 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
 
   const handleApplyDraft = () => {
     if (aiDraft?.data?.modules) {
-      const converted = aiDraft.data.modules.map((m: any, idx: number) => ({
-        id: m.id || `mod-ai-${idx}-${Date.now()}`,
-        name: m.title || m.name,
-        title: m.title || m.name,
+      userEditedRef.current = true;
+      const converted = aiDraft.data.modules.map((m, idx) => ({
+        id: `${m.id || `mod-ai-${idx}`}-${Date.now()}`,
+        name: m.title,
         description: m.description,
         trainingTag: { name: 'AI Suggested' },
         practical_assignment: m.practical_assignment,
-        topics: m.topics || (m.lessons ? [{ title: 'Core Lessons & Topics', order: 1, lessons: m.lessons }] : []),
-        lessons: m.lessons || [],
+        topics: m.topics,
       }));
 
-      setModules(converted);
+      const updatedList = [...modules, ...converted];
+      setModules(updatedList);
       if (onUpdateData) {
         onUpdateData({
           ...data,
-          modules: converted,
+          modules: updatedList,
         });
       }
       setAiDraft(null);
-      if (onDismissDraft) onDismissDraft();
+      onDismissDraft?.();
       if (converted[0]?.id) setOpenModuleId(converted[0].id);
     }
   };
@@ -110,6 +128,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
   const handleAddModule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newModuleName.trim()) return;
+    userEditedRef.current = true;
     const newMod = {
       id: `module-${Date.now()}`,
       name: newModuleName,
@@ -138,7 +157,7 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
-          {/* AI Copilot Button */}
+          {/* Curriculum Copilot Button (interactive elicitation drawer) */}
           <button
             onClick={() => {
               if (onOpenCopilot) {
@@ -155,7 +174,21 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating...' : 'Generate with Copilot'}</span>
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Generate with Copilot'}</span>
+          </button>
+
+          {/* AI Generator Button */}
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating}
+            className="bg-brand text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            {isGenerating ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-cyan-200" />
+            )}
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Suggest Modules with AI'}</span>
           </button>
 
           {/* Manual Add Button */}
@@ -169,6 +202,29 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
         </div>
       </div>
 
+      {/* Training structure status (real TSP records) */}
+      {structureLoading && (
+        <div className="mb-6 text-xs text-gray-500 px-3 py-2 border rounded-lg bg-gray-50 inline-flex items-center gap-2">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading real training structure from the backend…
+        </div>
+      )}
+      {!structureLoading && structureError && (
+        <div className="mb-6 flex items-center gap-2 border border-red-200 bg-red-50 text-red-700 rounded-lg p-3 text-xs">
+          <AlertTriangle className="w-4 h-4" />
+          <span>Could not load the real training structure ({structureError}) — showing demo data below.</span>
+          <button onClick={retryStructure} className="underline font-semibold hover:text-red-800">
+            Retry
+          </button>
+        </div>
+      )}
+      {!structureLoading && !structureError && structure && (
+        <div className="mb-6 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3 inline-flex items-center gap-2">
+          <BookOpen className="w-3.5 h-3.5" />
+          Showing {structure.modules.length} real module(s) from the backend training
+          {structure.title ? ` “${structure.title}”` : ''}.
+        </div>
+      )}
+
       {/* Error banner */}
       {errorMessage && (
         <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
@@ -179,25 +235,26 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
         <AiDraftCard
           title="Suggested Curriculum Modules"
           model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
           isLoading={isGenerating}
           onApply={handleApplyDraft}
           onDismiss={() => {
             setAiDraft(null);
-            if (onDismissDraft) onDismissDraft();
+            onDismissDraft?.();
           }}
           onRegenerate={handleGenerate}
         >
           <div className="space-y-4">
             <p className="text-xs text-gray-500">
-              The AI model generated {aiDraft.data.modules.length} recommended modules with topics and practical lab assignments:
+              The AI model generated {aiDraft.data.modules.length} recommended modules with lessons and practical lab assignments:
             </p>
             <div className="space-y-3">
-              {aiDraft.data.modules.map((m: any, idx: number) => (
+              {aiDraft.data.modules.map((m, idx) => (
                 <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
                   <div className="flex items-center justify-between">
-                    <h5 className="font-bold text-gray-900 text-sm">{m.title || m.name}</h5>
+                    <h5 className="font-bold text-gray-900 text-sm">{m.title}</h5>
                     <span className="text-[11px] font-medium bg-blue-100 text-blue-700 px-2 py-0.5 rounded">
-                      Order {m.order || idx + 1}
+                      Order {m.order}
                     </span>
                   </div>
                   <p className="text-xs text-gray-600">{m.description}</p>
@@ -216,12 +273,10 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
                   )}
 
                   {/* Lessons */}
-                  {((m.lessons && m.lessons.length > 0) || m.topics?.[0]?.lessons) && (
+                  {m.topics?.[0]?.lessons && (
                     <div className="pt-1 text-xs text-gray-600">
-                      <span className="font-medium text-gray-700">Topics & Lessons: </span>
-                      {(m.lessons || m.topics[0].lessons)
-                        .map((l: any) => `${l.title} (${l.duration}m)`)
-                        .join(', ')}
+                      <span className="font-medium text-gray-700">Lessons: </span>
+                      {m.topics[0].lessons.map((l) => `${l.title} (${l.duration} ${l.duration_type.toLowerCase()})`).join(', ')}
                     </div>
                   )}
                 </div>
@@ -309,51 +364,51 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({
                     )}
 
                     {/* Topics / Lessons if present */}
-                    {((mod.lessons && mod.lessons.length > 0) || (mod.topics && mod.topics.length > 0)) && (
+                    {mod.topics && mod.topics.length > 0 && (
                       <div className="space-y-2 pt-2 border-t border-gray-100">
                         <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                          Structured Lessons & Topics
+                          Structured Topics & Lessons
                         </h5>
-                        {mod.lessons && mod.lessons.length > 0 && (
-                          <div className="p-3 bg-gray-50 rounded-lg border border-gray-200 text-xs">
-                            <ul className="space-y-2">
-                              {mod.lessons.map((l: any, li: number) => (
-                                <li key={li} className="flex items-start gap-2">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mt-1.5 shrink-0" />
-                                  <div>
-                                    <span className="font-semibold text-gray-900">{l.title}</span>
-                                    {l.duration && (
-                                      <span className="ml-1 text-[11px] text-gray-500">
-                                        ({l.duration} {l.duration_type?.toLowerCase() || 'min'})
-                                      </span>
-                                    )}
-                                    {l.objective && (
-                                      <p className="text-gray-600 mt-0.5">{l.objective}</p>
-                                    )}
-                                  </div>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {mod.topics && mod.topics.length > 0 && !mod.lessons && (
-                          <div className="space-y-2">
-                            {mod.topics.map((t: any, ti: number) => (
-                              <div key={ti} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
-                                <span className="font-bold text-gray-900">{t.title}</span>
-                                {t.lessons && (
-                                  <ul className="list-disc list-inside mt-1 text-gray-600 space-y-0.5">
-                                    {t.lessons.map((l: any, li: number) => (
-                                      <li key={li}>
-                                        {l.title} &mdash; {l.objective} ({l.duration} {l.duration_type?.toLowerCase()})
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                        <div className="space-y-2">
+                          {mod.topics.map((t: any, ti: number) => (
+                            <div key={ti} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
+                              <span className="font-bold text-gray-900">{t.title}</span>
+                              {t.lessons && (
+                                <ul className="list-disc list-inside mt-1 text-gray-600 space-y-0.5">
+                                  {t.lessons.map((l: any, li: number) => (
+                                    <li key={li}>
+                                      {l.title} &mdash; {l.objective} ({l.duration} {l.duration_type?.toLowerCase()})
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Real TSP lessons (flat list from the structure endpoint) */}
+                    {mod.lessons && mod.lessons.length > 0 && (
+                      <div className="space-y-2 pt-2 border-t border-gray-100">
+                        <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Lessons ({mod.lessons.length})
+                        </h5>
+                        <ul className="space-y-1.5">
+                          {mod.lessons.map((l: any, li: number) => (
+                            <li key={l.id || li} className="p-2.5 bg-gray-50 rounded border border-gray-200 text-xs">
+                              <span className="font-bold text-gray-900">{l.title}</span>
+                              {l.objective && (
+                                <span className="text-gray-600"> &mdash; {l.objective}</span>
+                              )}
+                              {l.duration != null && (
+                                <span className="text-gray-500">
+                                  {' '}({l.duration} {(l.duration_type || '').toLowerCase()})
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     )}
 

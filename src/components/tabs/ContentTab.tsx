@@ -1,14 +1,25 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw } from 'lucide-react';
-import { generateTabDraft, ContentDescriptionDraftData } from '../../api/tabs';
+import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData, getActiveTrainingId, ContentTargetOption } from '../../api/tabs';
+import { buildContentTargets, moduleNameForTarget, normalizeTabDraft } from '../../api/adapters';
+import {
+  resolveContentSelection,
+  canStartContentGeneration,
+  buildContentGenerationRequest,
+} from '../../api/contentSelection';
+import { useTrainingStructure } from '../../api/useTrainingStructure';
+import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
 interface ContentTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
+  /** Draft pushed by the Curriculum Copilot (backend-shape payload). */
+  suggestedDraft?: any;
+  onDismissDraft?: () => void;
 }
 
-export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) => {
+export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, suggestedDraft, onDismissDraft }) => {
   const [contents, setContents] = useState(data.contents || []);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedModule, setSelectedModule] = useState('ALL');
@@ -16,23 +27,94 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newType, setNewType] = useState('PDF');
-  const [selectedModuleId, setSelectedModuleId] = useState<string>(
-    data.modules?.[0]?.id || data.modules?.[0]?.name || ''
+  const [newModule, setNewModule] = useState(
+    data.modules?.[0]?.name || 'Phase One Final Research'
   );
 
-  const [isModalGenerating, setIsModalGenerating] = useState(false);
-  const [modalAiError, setModalAiError] = useState<string | null>(null);
-  const [hasAiSuggested, setHasAiSuggested] = useState(false);
-  const activeRequestRef = useRef<number>(0);
+  /**
+   * Backend contract: content-description generation requires a target
+   * (kind: 'module' | 'lesson', id of a real record). The options come
+   * exclusively from the backend's read-only training structure endpoint —
+   * never from mock data. On failure there is NO mock fallback: the error is
+   * shown and generation is blocked until real records load.
+   */
+  const trainingId = getActiveTrainingId(data.training?.id);
 
-  const trainingId = data.training?.id || 'd734b694-0802-4a4a-8a51-eaa693a10abd';
+  const {
+    structure,
+    loading: structureLoading,
+    error: structureError,
+    retry: retryStructure,
+  } = useTrainingStructure(trainingId);
 
-  // Keep selectedModuleId synced if data.modules initializes later
+  const targetOptions: ContentTargetOption[] = useMemo(
+    () => buildContentTargets(structure),
+    [structure]
+  );
+
+  const [selectedTargetId, setSelectedTargetId] = useState<string>('');
+
+  // Explicit-selection workflow: the trainer picks a target — the component
+  // never auto-selects one. This effect only CLEARS an invalid selection:
+  // when the structure loads fresh, changes, or the selected target
+  // disappeared (e.g. after switching training contexts), the stale id is
+  // dropped so generation can never use a target the backend doesn't know.
   useEffect(() => {
-    if (data.modules?.length && !selectedModuleId) {
-      setSelectedModuleId(data.modules[0].id || data.modules[0].name || '');
+    const resolved = resolveContentSelection(targetOptions, selectedTargetId);
+    if (resolved !== selectedTargetId) {
+      setSelectedTargetId(resolved);
     }
-  }, [data.modules, selectedModuleId]);
+  }, [targetOptions, selectedTargetId]);
+
+  const selectedTarget: ContentTargetOption | null =
+    targetOptions.find((t) => t.id === selectedTargetId) ?? null;
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiDraft, setAiDraft] = useState<TabDraftResponse<ContentDescriptionDraftData> | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // A draft or error generated for a previous training must not carry over
+  // into a new training context. Declared BEFORE the cached-draft effect so
+  // a freshly loaded cached draft for the new training still displays.
+  useEffect(() => {
+    setAiDraft(null);
+    setErrorMessage(null);
+  }, [trainingId]);
+
+  // Sync draft pushed by the Curriculum Copilot (backend-shape payload),
+  // normalized through the same adapter/validation pipeline.
+  useEffect(() => {
+    if (!suggestedDraft) return;
+    try {
+      const normalized = normalizeTabDraft(
+        'content-description',
+        { status: 'success', tab: 'content-description', data: suggestedDraft },
+        { source: 'backend' }
+      );
+      setAiDraft(normalized as TabDraftResponse<ContentDescriptionDraftData>);
+    } catch {
+      // DraftValidationError: unusable payload — no empty card, no error spam.
+    }
+  }, [suggestedDraft]);
+
+  // Check cached draft on mount
+  useEffect(() => {
+    getCachedDraft<ContentDescriptionDraftData>('content-description', trainingId).then((draft) => {
+      if (draft && draft.data?.contents?.length) {
+        // Issue 2: the backend cache keeps returning the same draft after it
+        // was applied — re-applying it creates a duplicate content record.
+        // Skip drafts whose backend request_id was already applied this
+        // session. A fresh regeneration gets a new request_id and can be
+        // applied again normally.
+        const requestId = draft.request_id || '';
+        const applied = (data.appliedContentRequestIds ?? []) as string[];
+        if (requestId && applied.includes(requestId)) {
+          return;
+        }
+        setAiDraft(draft);
+      }
+    });
+  }, [trainingId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const modulesList = Array.from(
     new Set((data.contents || []).map((c) => c.moduleName).filter(Boolean))
@@ -50,114 +132,101 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
     return matchesSearch && matchesModule;
   });
 
-  const getTargetModule = (targetId: string) => {
-    if (!data.modules?.length) return null;
-    return (
-      data.modules.find(
-        (m: any) =>
-          String(m.id) === String(targetId) ||
-          m.name === targetId ||
-          m.title === targetId
-      ) || data.modules[0]
-    );
-  };
+  const handleGenerate = async () => {
+    // One click = at most one request: while a generation is in flight the
+    // gate below blocks any re-entry, and the Generate button is disabled.
+    const gate = canStartContentGeneration({
+      isGenerating,
+      structureLoading,
+      structureError,
+      selectedTarget,
+    });
+    if (!gate.allowed) {
+      setErrorMessage(gate.reason ?? 'Generation is not available right now.');
+      return;
+    }
 
-  const fetchModuleSuggestion = async (targetId: string) => {
-    const targetMod = getTargetModule(targetId);
-    if (!targetMod) return;
-
-    const requestId = ++activeRequestRef.current;
-    setIsModalGenerating(true);
-    setModalAiError(null);
-    setHasAiSuggested(false);
-    // Clear previous inputs so the user sees fresh generation for the selected module
-    setNewName('');
-    setNewDesc('');
-
+    // Backend contract: a real target record (kind + id) is required, and it
+    // must come from the loaded training structure — never from mock data.
+    setIsGenerating(true);
+    setErrorMessage(null);
     try {
-      const modId = targetMod.id || `mod-${Date.now()}`;
-      const modTitle = targetMod.title || targetMod.name || 'Module';
-      const modDesc = targetMod.description || '';
-
+      const request = buildContentGenerationRequest(trainingId, selectedTarget!);
       const response = await generateTabDraft<ContentDescriptionDraftData>(
-        'content-description',
-        trainingId,
-        {
-          kind: 'module',
-          id: modId,
-          title: modTitle,
-          name: modTitle,
-          description: modDesc,
-        }
+        request.tab,
+        request.trainingId,
+        request.target
       );
-
-      // Discard stale out-of-order response if user picked another module
-      if (activeRequestRef.current !== requestId) return;
-
-      if (response && response.data) {
-        if (response.data.title) {
-          setNewName(response.data.title);
-        } else {
-          setNewName(`${modTitle} Resource Guide`);
-        }
-        if (response.data.description) {
-          setNewDesc(response.data.description);
-        }
-        setHasAiSuggested(true);
-      }
+      setAiDraft(response);
     } catch (err: any) {
-      if (activeRequestRef.current !== requestId) return;
-      setModalAiError(err.message || 'AI suggestion failed. You can type manually.');
+      setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
     } finally {
-      if (activeRequestRef.current === requestId) {
-        setIsModalGenerating(false);
+      setIsGenerating(false);
+    }
+  };
+
+  const handleApplyDraft = () => {
+    if (aiDraft?.data?.contents) {
+      // Issue 2: request-level idempotency — the same backend draft (same
+      // request_id) can only create content once, guarding against double
+      // clicks and the remount-time cached-draft re-apply. A regenerated
+      // draft carries a new request_id, so intentional separate generations
+      // still create separate records.
+      const requestId = aiDraft.request_id || '';
+      const applied = (data.appliedContentRequestIds ?? []) as string[];
+      if (requestId && applied.includes(requestId)) {
+        setAiDraft(null);
+        return;
       }
-    }
-  };
+      // Issue 1: associate the content with the module the user actually
+      // selected (resolved by ID from the backend training structure —
+      // never the first module, never text matching). The generation-time
+      // target is carried on the draft itself, so a later selection change
+      // cannot corrupt the association. Unresolvable targets stay
+      // unassociated ('') rather than being silently mislabeled.
+      const target = aiDraft.data.target as
+        | { kind: 'module' | 'lesson'; id: string }
+        | null | undefined;
+      const resolvedModuleName = moduleNameForTarget(target, structure);
+      const newItems = aiDraft.data.contents.map((c, i) => {
+        const takeaways =
+          c.key_takeaways && c.key_takeaways.length > 0
+            ? `\n\nKey Takeaways:\n${c.key_takeaways.map((t) => `• ${t}`).join('\n')}`
+            : '';
+        return {
+          id: `content-ai-${i}-${Date.now()}`,
+          name: c.lesson_title || 'AI Suggested Content',
+          description: `${c.content_description}${takeaways}`,
+          contentLevel: 'LESSON',
+          contentFileType: 'PDF',
+          contentStatus: 'ACCEPTED',
+          moduleName: resolvedModuleName,
+          contentDeveloper: {
+            email: 'gemma-ai@gheero.et',
+            role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
+          },
+        };
+      });
 
-  const handleOpenAddModal = () => {
-    let target = data.modules?.[0];
-    if (selectedModule !== 'ALL') {
-      const matched = data.modules?.find(
-        (m: any) =>
-          m.name === selectedModule ||
-          m.title === selectedModule ||
-          String(m.id) === String(selectedModule)
-      );
-      if (matched) target = matched;
+      const updated = [...newItems as any, ...contents];
+      setContents(updated);
+      if (onUpdateData) {
+        onUpdateData({
+          ...data,
+          contents: updated,
+          appliedContentRequestIds: requestId
+            ? [...applied, requestId]
+            : applied,
+        });
+      }
+      setAiDraft(null);
+      onDismissDraft?.();
     }
-    const chosenId = target?.id || target?.name || target?.title || '';
-    setSelectedModuleId(chosenId);
-    setNewName('');
-    setNewDesc('');
-    setHasAiSuggested(false);
-    setModalAiError(null);
-    setIsAddOpen(true);
-    if (chosenId) {
-      fetchModuleSuggestion(chosenId);
-    }
-  };
-
-  const handleCloseAddModal = () => {
-    activeRequestRef.current++;
-    setIsModalGenerating(false);
-    setModalAiError(null);
-    setIsAddOpen(false);
-  };
-
-  const handleModuleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selected = e.target.value;
-    setSelectedModuleId(selected);
-    fetchModuleSuggestion(selected);
   };
 
   const handleAddContent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
-
-    const targetMod = getTargetModule(selectedModuleId);
-    const modDisplayName = targetMod?.name || targetMod?.title || 'General';
-
     const newContent = {
       id: `content-${Date.now()}`,
       name: newName,
@@ -165,7 +234,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
       contentLevel: 'MODULE',
       contentFileType: newType,
       contentStatus: 'PENDING',
-      moduleName: modDisplayName,
+      moduleName: newModule,
       contentDeveloper: {
         email: 'developer@gheero.et',
         role: { name: 'ROLE_CONTENT_DEVELOPER', colorCode: '#Content Developer' },
@@ -178,8 +247,6 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
     }
     setNewName('');
     setNewDesc('');
-    setHasAiSuggested(false);
-    setModalAiError(null);
     setIsAddOpen(false);
   };
 
@@ -194,9 +261,71 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
+          {/* Target selector (backend requires kind + id of a real record) */}
+          {structureLoading && (
+            <span className="text-xs text-gray-500 px-2 py-2">Loading training structure…</span>
+          )}
+          {!structureLoading && structureError && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-red-600 bg-red-50 border border-red-200 px-2.5 py-2 rounded-md">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Training structure unavailable</span>
+              <button
+                onClick={retryStructure}
+                className="ml-1 underline font-semibold text-red-700 hover:text-red-800"
+              >
+                Retry
+              </button>
+            </span>
+          )}
+          {!structureLoading && !structureError && targetOptions.length === 0 && (
+            <span className="text-xs text-gray-500 px-2 py-2">
+              No modules or lessons found for this training.
+            </span>
+          )}
+          {!structureLoading &&
+            !structureError &&
+            targetOptions.length > 0 &&
+            !selectedTarget && (
+              <span className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-2 rounded-md">
+                Select a module or lesson below to generate content for.
+              </span>
+            )}
+          {targetOptions.length > 0 && (
+            <select
+              value={selectedTargetId}
+              onChange={(e) => setSelectedTargetId(e.target.value)}
+              disabled={isGenerating || structureLoading || !!structureError}
+              className="border border-gray-300 rounded-md text-xs px-2.5 py-2 bg-white text-gray-700 max-w-[220px] disabled:opacity-50"
+              title="Content target for AI generation (real TSP records)"
+              aria-label="Content generation target"
+            >
+              <option value="" disabled>
+                Select a module or lesson…
+              </option>
+              {targetOptions.map((t) => (
+                <option key={`${t.kind}-${t.id}`} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* AI Generator Button */}
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating || structureLoading || !!structureError || !selectedTarget}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
+          >
+            {isGenerating ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-cyan-200" />
+            )}
+            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Suggest Content with AI'}</span>
+          </button>
+
           {/* Manual Add Button */}
           <button
-            onClick={handleOpenAddModal}
+            onClick={() => setIsAddOpen(true)}
             className="bg-brand text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
           >
             <Plus className="w-4 h-4" />
@@ -204,6 +333,69 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
           </button>
         </div>
       </div>
+
+      {/* Error banner */}
+      {errorMessage && (
+        <AiErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} />
+      )}
+
+      {/* AI Draft Suggestion Card */}
+      {aiDraft && aiDraft.data?.contents && (
+        <AiDraftCard
+          title="Suggested Lesson Content"
+          model={aiDraft.model || 'gemma4:31b-cloud'}
+          source={aiDraft.source}
+          isLoading={isGenerating}
+          onApply={handleApplyDraft}
+          onDismiss={() => {
+            setAiDraft(null);
+            onDismissDraft?.();
+          }}
+          onRegenerate={handleGenerate}
+        >
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">
+              The AI generated {aiDraft.data.contents.length} content description(s) for the selected target:
+            </p>
+            <div className="space-y-3">
+              {aiDraft.data.contents.map((c, idx) => (
+                <div key={idx} className="p-3.5 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
+                  <div className="flex items-center justify-between flex-wrap gap-1">
+                    <h5 className="font-bold text-gray-900 text-sm">
+                      {c.lesson_title || 'Selected target'}
+                      {aiDraft.data.target?.kind ? (
+                        <span className="ml-2 text-[10px] font-mono uppercase text-gray-400">
+                          {aiDraft.data.target.kind}
+                        </span>
+                      ) : null}
+                    </h5>
+                    {c.lesson_id && (
+                      <span className="text-[11px] font-mono bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
+                        ID: {c.lesson_id}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-line">
+                    {c.content_description}
+                  </p>
+                  {c.key_takeaways.length > 0 && (
+                    <div className="pt-1.5 border-t border-gray-200">
+                      <span className="text-[11px] font-semibold text-gray-700 block mb-1">
+                        Key Takeaways:
+                      </span>
+                      <ul className="list-disc list-inside text-xs text-gray-600 space-y-0.5">
+                        {c.key_takeaways.map((t, ti) => (
+                          <li key={ti}>{t}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </AiDraftCard>
+      )}
 
       {/* Filters & Search */}
       <div className="flex flex-col sm:flex-row gap-4 mb-6">
@@ -311,136 +503,58 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4">
             <div className="flex justify-between items-center border-b pb-3">
-              <div>
-                <h3 className="text-lg font-bold text-gray-900">Add Training Content</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Select a module and the AI will automatically suggest a title and description.
-                </p>
-              </div>
+              <h3 className="text-lg font-bold text-gray-900">Add Training Content</h3>
               <button
-                onClick={handleCloseAddModal}
+                onClick={() => setIsAddOpen(false)}
                 className="text-gray-400 hover:text-gray-600 text-xl font-bold"
               >
                 &times;
               </button>
             </div>
-
             <form onSubmit={handleAddContent} className="space-y-4">
-              {/* Module selection */}
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-semibold text-gray-700">
-                    Module
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => fetchModuleSuggestion(selectedModuleId)}
-                    disabled={isModalGenerating}
-                    className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 disabled:opacity-50 transition-colors"
-                  >
-                    {isModalGenerating ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-                    )}
-                    <span>{isModalGenerating ? 'Generating...' : 'Suggest with AI'}</span>
-                  </button>
-                </div>
-                <select
-                  value={selectedModuleId}
-                  onChange={handleModuleChange}
-                  disabled={isModalGenerating}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA] bg-white disabled:bg-gray-50"
-                >
-                  {data.modules?.map((m) => {
-                    const val = m.id || m.name || m.title;
-                    const label = m.title || m.name;
-                    return (
-                      <option key={val} value={val}>
-                        {label}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              {/* Status / feedback banners */}
-              {isModalGenerating && (
-                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center gap-2.5 text-xs text-indigo-700 animate-pulse">
-                  <RefreshCw className="w-4 h-4 animate-spin text-indigo-600 shrink-0" />
-                  <span>
-                    AI is crafting a title and description for{' '}
-                    <strong>
-                      {getTargetModule(selectedModuleId)?.title ||
-                       getTargetModule(selectedModuleId)?.name ||
-                       'selected module'}
-                    </strong>
-                    ...
-                  </span>
-                </div>
-              )}
-
-              {modalAiError && (
-                <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600 flex items-center justify-between">
-                  <span>{modalAiError}</span>
-                  <button
-                    type="button"
-                    onClick={() => fetchModuleSuggestion(selectedModuleId)}
-                    className="underline font-semibold ml-2 text-red-700"
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-
-              {hasAiSuggested && !isModalGenerating && (
-                <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-700 flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>
-                    AI suggested title &amp; description applied for{' '}
-                    <strong>
-                      {getTargetModule(selectedModuleId)?.title ||
-                       getTargetModule(selectedModuleId)?.name ||
-                       'this module'}
-                    </strong>
-                    . You can edit them below.
-                  </span>
-                </div>
-              )}
-
-              {/* Title input */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Title
-                </label>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Title</label>
                 <input
                   type="text"
                   required
-                  placeholder={isModalGenerating ? "Generating suggested title..." : "e.g. Fine-Tuning LLMs with LoRA"}
+                  placeholder="e.g. Fine-Tuning LLMs with LoRA"
                   value={newName}
-                  disabled={isModalGenerating}
                   onChange={(e) => setNewName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA] disabled:bg-gray-50"
+                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
                 />
               </div>
-
-              {/* File Type */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  File Type
-                </label>
-                <select
-                  value={newType}
-                  onChange={(e) => setNewType(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA] bg-white"
-                >
-                  <option value="PDF">PDF Document</option>
-                  <option value="LINK">External Link</option>
-                  <option value="VIDEO">Video</option>
-                </select>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    File Type
+                  </label>
+                  <select
+                    value={newType}
+                    onChange={(e) => setNewType(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
+                  >
+                    <option value="PDF">PDF Document</option>
+                    <option value="LINK">External Link</option>
+                    <option value="VIDEO">Video</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    Module
+                  </label>
+                  <select
+                    value={newModule}
+                    onChange={(e) => setNewModule(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
+                  >
+                    {data.modules?.map((m) => (
+                      <option key={m.id} value={m.name}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-
-              {/* Description textarea */}
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">
                   Description
@@ -448,27 +562,23 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
                 <textarea
                   rows={4}
                   required
-                  placeholder={isModalGenerating ? "Generating suggested description..." : "Describe the content, learning goals, or instructions..."}
+                  placeholder="Describe the content, learning goals, or instructions..."
                   value={newDesc}
-                  disabled={isModalGenerating}
                   onChange={(e) => setNewDesc(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA] disabled:bg-gray-50"
+                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
                 />
               </div>
-
-              {/* Actions */}
               <div className="flex justify-end gap-3 pt-3 border-t">
                 <button
                   type="button"
-                  onClick={handleCloseAddModal}
+                  onClick={() => setIsAddOpen(false)}
                   className="px-4 py-2 border rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isModalGenerating || !newName.trim()}
-                  className="px-4 py-2 bg-brand text-white rounded-md text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  className="px-4 py-2 bg-brand text-white rounded-md text-sm font-semibold hover:bg-blue-700"
                 >
                   Upload Content
                 </button>
