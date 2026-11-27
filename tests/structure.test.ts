@@ -13,7 +13,7 @@ import {
   setEnvReaderForTests,
   generateTabDraft,
 } from '../src/api/tabs';
-import { buildContentTargets, type BackendTrainingStructure } from '../src/api/adapters';
+import { buildContentTargets, resolveContentApplyAssociation, type BackendTrainingStructure } from '../src/api/adapters';
 
 const TRAINING_ID = 'ea7953f9-e773-4d2c-a895-b8ecf2e969ed';
 const COMPANY_ID = '816e9eab-f109-4de2-b7aa-154f8cb2ac67';
@@ -105,6 +105,182 @@ describe('buildContentTargets', () => {
   it('returns [] for null structure and structures without modules', () => {
     expect(buildContentTargets(null)).toEqual([]);
     expect(buildContentTargets({ training_id: TRAINING_ID, modules: [] })).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildContentTargets — session demo modules applied from the Module tab
+// ---------------------------------------------------------------------------
+
+describe('buildContentTargets — session demo modules', () => {
+  const sessionModules = [
+    {
+      id: 'mod-1-1700000000000',
+      name: 'Generated Module: Evaluation',
+      trainingTag: { name: 'AI Suggested' },
+      topics: [
+        {
+          title: 'Lessons',
+          order: 1,
+          lessons: [
+            {
+              id: 'lesson-1-1',
+              title: 'Generated Lesson: Metrics',
+              objective: 'Measure model quality.',
+            },
+            { id: 'lesson-1-2', title: 'Generated Lesson: Error analysis', objective: null },
+          ],
+        },
+      ],
+    },
+    // Seeded mock modules are not session-generated and must stay hidden.
+    { id: 'mock-module-id', name: 'Seeded Mock Module', trainingTag: { name: 'Product Specific' } },
+  ];
+
+  it('adds applied session modules and their lessons, clearly labelled demo', () => {
+    const targets = buildContentTargets(structure, sessionModules);
+    const demoModule = targets.find((t) => t.id === 'mod-1-1700000000000');
+    expect(demoModule).toMatchObject({
+      kind: 'module',
+      source: 'demo',
+      label: 'Module: Generated Module: Evaluation (demo)',
+      title: 'Generated Module: Evaluation',
+    });
+    const demoLesson = targets.find((t) => t.id === 'lesson-1-1');
+    expect(demoLesson).toMatchObject({
+      kind: 'lesson',
+      source: 'demo',
+      label: 'Lesson: Generated Lesson: Metrics (demo)',
+      moduleId: 'mod-1-1700000000000',
+      moduleTitle: 'Generated Module: Evaluation',
+      objective: 'Measure model quality.',
+    });
+    expect(targets.some((t) => t.id === 'lesson-1-2')).toBe(true);
+  });
+
+  it('keeps all persisted TSP targets and labels them as tsp', () => {
+    const targets = buildContentTargets(structure, sessionModules);
+    const persisted = targets.filter((t) => t.source === 'tsp');
+    expect(persisted.map((t) => t.id)).toEqual([
+      'd9953605-95f2-4f66-b677-3a23a0feb581',
+      '11621e53-5c20-44e4-bb46-bd66208482ed',
+      'bce7dce5-cfab-46f1-8438-786a5c343e75',
+      '20f19f43-647f-47f9-8162-d7571f8926b6',
+      'e855e556-bd41-4857-b059-89f19010599a',
+    ]);
+    expect(targets.some((t) => t.id === '11621e53-5c20-44e4-bb46-bd66208482ed' && t.source === 'tsp')).toBe(true);
+  });
+
+  it('never duplicates a persisted id — the TSP record wins', () => {
+    const duplicateSession = [
+      {
+        id: structure.modules[0].id,
+        name: 'Conflicting Session Name',
+        trainingTag: { name: 'AI Suggested' },
+        topics: [
+          {
+            title: 'Lessons',
+            lessons: [{ id: structure.modules[0].lessons[0].id, title: 'Conflicting Lesson' }],
+          },
+        ],
+      },
+    ];
+    const targets = buildContentTargets(structure, duplicateSession);
+    const moduleMatches = targets.filter((t) => t.id === structure.modules[0].id);
+    expect(moduleMatches).toHaveLength(1);
+    expect(moduleMatches[0].source).toBe('tsp');
+    const lessonMatches = targets.filter((t) => t.id === structure.modules[0].lessons[0].id);
+    expect(lessonMatches).toHaveLength(1);
+    expect(lessonMatches[0].source).toBe('tsp');
+  });
+
+  it('reads lessons from a flat lessons array (copilot-applied shape)', () => {
+    const copilotModules = [
+      {
+        id: 'mod-ai-0-1700000000000',
+        title: 'Copilot Module',
+        trainingTag: { name: 'AI Suggested' },
+        lessons: [{ id: 'lesson-ai-0', title: 'Copilot Lesson', objective: 'Practice.' }],
+      },
+    ];
+    const targets = buildContentTargets(structure, copilotModules);
+    expect(targets.find((t) => t.id === 'mod-ai-0-1700000000000')).toMatchObject({ source: 'demo' });
+    expect(targets.find((t) => t.id === 'lesson-ai-0')).toMatchObject({
+      source: 'demo',
+      moduleTitle: 'Copilot Module',
+    });
+  });
+
+  it('ignores modules that are not generated session records', () => {
+    const targets = buildContentTargets(structure, sessionModules);
+    expect(targets.some((t) => t.id === 'mock-module-id')).toBe(false);
+    expect(targets.some((t) => t.title === 'Seeded Mock Module')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveContentApplyAssociation — persisted vs session association
+// ---------------------------------------------------------------------------
+
+describe('resolveContentApplyAssociation', () => {
+  it('resolves a persisted lesson to its real parent module', () => {
+    const association = resolveContentApplyAssociation(
+      {
+        kind: 'lesson',
+        id: '11621e53-5c20-44e4-bb46-bd66208482ed',
+        title: 'Lesson 1: Platform Navigation Video',
+      },
+      structure,
+    );
+    expect(association).toEqual({
+      moduleName: 'Module 1: Data Contributor Guideline',
+      lessonName: 'Lesson 1: Platform Navigation Video',
+      lessonId: '11621e53-5c20-44e4-bb46-bd66208482ed',
+      targetSource: 'tsp',
+    });
+  });
+
+  it('resolves a persisted module by id', () => {
+    const association = resolveContentApplyAssociation(
+      { kind: 'module', id: 'bce7dce5-cfab-46f1-8438-786a5c343e75', title: 'Module 2: Digital Literacy' },
+      structure,
+    );
+    expect(association.moduleName).toBe('Module 2: Digital Literacy');
+    expect(association.targetSource).toBe('tsp');
+    expect(association.lessonId).toBeUndefined();
+  });
+
+  it('keeps the parent module of a session demo lesson', () => {
+    const association = resolveContentApplyAssociation(
+      {
+        kind: 'lesson',
+        id: 'lesson-1-1',
+        title: 'Generated Lesson: Metrics',
+        module_title: 'Generated Module: Evaluation',
+        source: 'demo',
+      },
+      structure,
+    );
+    expect(association).toEqual({
+      moduleName: 'Generated Module: Evaluation',
+      lessonName: 'Generated Lesson: Metrics',
+      lessonId: 'lesson-1-1',
+      targetSource: 'demo',
+    });
+  });
+
+  it('associates a session demo module by its own title', () => {
+    const association = resolveContentApplyAssociation(
+      {
+        kind: 'module',
+        id: 'mod-1-1700000000000',
+        title: 'Generated Module: Evaluation',
+        source: 'demo',
+      },
+      structure,
+    );
+    expect(association.moduleName).toBe('Generated Module: Evaluation');
+    expect(association.targetSource).toBe('demo');
   });
 });
 

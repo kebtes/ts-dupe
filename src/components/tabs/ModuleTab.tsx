@@ -9,14 +9,12 @@ import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 interface ModuleTabProps {
   data: TrainingData;
   onUpdateData?: (updated: any) => void;
-  /** Opens the Curriculum Copilot drawer for this tab. */
-  onOpenCopilot?: () => void;
   /** Draft pushed by the Curriculum Copilot (backend-shape payload). */
   suggestedDraft?: any;
   onDismissDraft?: () => void;
 }
 
-export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData, onOpenCopilot, suggestedDraft, onDismissDraft }) => {
+export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData, suggestedDraft, onDismissDraft }) => {
   const [modules, setModules] = useState(data.modules || []);
   const [openModuleId, setOpenModuleId] = useState<string | null>(modules[0]?.id || null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -157,26 +155,6 @@ export const ModuleTab: React.FC<ModuleTabProps> = ({ data, onUpdateData, onOpen
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto">
-          {/* Curriculum Copilot Button (interactive elicitation drawer) */}
-          <button
-            onClick={() => {
-              if (onOpenCopilot) {
-                onOpenCopilot();
-              } else {
-                handleGenerate();
-              }
-            }}
-            disabled={isGenerating}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
-          >
-            {isGenerating ? (
-              <RefreshCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Sparkles className="w-4 h-4 text-cyan-200" />
-            )}
-            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Generate with Copilot'}</span>
-          </button>
-
           {/* AI Generator Button */}
           <button
             onClick={handleGenerate}

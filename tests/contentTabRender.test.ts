@@ -124,3 +124,61 @@ describe('ContentTab open-the-tab state (SSR, structure loaded)', () => {
     expect(html.slice(buttonStart, labelIndex)).not.toContain('</button>');
   });
 });
+
+describe('ContentTab session demo targets (applied from the Module tab)', () => {
+  const sessionModule = {
+    id: 'mod-1-1700000000000',
+    name: 'Generated Module: Evaluation',
+    trainingTag: { name: 'AI Suggested' },
+    topics: [
+      {
+        title: 'Lessons',
+        order: 1,
+        lessons: [
+          {
+            id: 'lesson-1-1',
+            title: 'Generated Lesson: Metrics',
+            objective: 'Measure model quality.',
+          },
+          { id: 'lesson-1-2', title: 'Generated Lesson: Error analysis', objective: null },
+        ],
+      },
+    ],
+  };
+
+  function renderTabWith(dataModules: any[]) {
+    const data = {
+      training: { id: 'train-1', title: 'T', rationale: 'R' },
+      modules: dataModules,
+      contents: [],
+    } as any;
+    return renderToStaticMarkup(
+      React.createElement(ContentTab, { data, onUpdateData: undefined })
+    );
+  }
+
+  it('lists applied session modules and lessons alongside persisted TSP targets', () => {
+    const html = renderTabWith([sessionModule]);
+    // Persisted structure targets are still present.
+    expect(html).toContain('Module: Module A');
+    expect(html).toContain('Lesson: Lesson A1');
+    // Session targets appear, clearly labelled demo.
+    expect(html).toContain('Module: Generated Module: Evaluation (demo)');
+    expect(html).toContain('Lesson: Generated Lesson: Metrics (demo)');
+    expect(html).toContain('Lesson: Generated Lesson: Error analysis (demo)');
+  });
+
+  it('keeps the explicit-selection workflow: session targets are not auto-selected', () => {
+    const html = renderTabWith([sessionModule]);
+    expect(html).toMatch(/<option value="" disabled="" selected="">/);
+    expect(html).not.toMatch(/<option value="lesson-1-1"[^>]*selected/);
+    expect(html).not.toMatch(/<option value="mod-1-1700000000000"[^>]*selected/);
+  });
+
+  it('does not leak seeded mock modules into the target list', () => {
+    const html = renderTabWith([
+      { id: 'mock-id', name: 'Seeded Mock Module', trainingTag: { name: 'Product Specific' } },
+    ]);
+    expect(html).not.toContain('Seeded Mock Module');
+  });
+});

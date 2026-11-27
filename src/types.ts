@@ -97,7 +97,11 @@ export interface TrainingData {
     link?: string;
     contentStatus: string;
     moduleName?: string;
+    /** Lesson this content belongs to (persisted lesson id or session demo id). */
+    lessonId?: string;
     lessonName?: string;
+    /** Provenance of the generation target ('demo' = frontend session record). */
+    targetSource?: 'tsp' | 'demo';
     contentDeveloper?: {
       email?: string;
       role?: { name: string; colorCode: string };

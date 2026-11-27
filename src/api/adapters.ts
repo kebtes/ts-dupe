@@ -50,6 +50,16 @@ export interface GenerationTarget {
   id: string;
   /** Presentation title resolved by the caller from its own records. */
   title?: string;
+  /** Parent module title for lesson targets (session/demo records). */
+  module_title?: string;
+  /** Lesson objective for client-provided (temporary) targets. */
+  objective?: string | null;
+  /** Lesson description for client-provided (temporary) targets. */
+  description?: string | null;
+  /** Parent module description for client-provided lesson targets. */
+  module_description?: string | null;
+  /** Provenance: persisted TSP record vs frontend session record. */
+  source?: 'tsp' | 'demo';
 }
 
 // ------------------------- Training Profile -------------------------
@@ -252,7 +262,13 @@ export interface ContentDescriptionItem {
 }
 
 export interface ContentDescriptionDraftData {
-  target: { kind: string; id: string; title?: string } | null;
+  target: {
+    kind: string;
+    id: string;
+    title?: string;
+    module_title?: string;
+    source?: 'tsp' | 'demo';
+  } | null;
   contents: ContentDescriptionItem[];
 }
 
@@ -433,7 +449,15 @@ export function normalizeContentDescriptionDraft(
   const description = str(data.description);
 
   return {
-    target: target ? { kind: target.kind, id: target.id, title: target.title } : null,
+    target: target
+      ? {
+          kind: target.kind,
+          id: target.id,
+          title: target.title,
+          module_title: target.module_title,
+          source: target.source,
+        }
+      : null,
     contents: [
       {
         lesson_id: target?.id ?? '',
@@ -633,6 +657,22 @@ export interface ContentTargetOption {
   id: string;
   title: string;
   label: string;
+  /**
+   * Where the target comes from: a persisted TSP record ('tsp', the default)
+   * or a module/lesson that exists only in this frontend session ('demo' —
+   * applied from the Module tab / Copilot). Demo targets must never be sent
+   * to the backend as if they were TSP ids.
+   */
+  source?: 'tsp' | 'demo';
+  /** Parent module identity for lesson targets (both sources). */
+  moduleId?: string;
+  moduleTitle?: string;
+  /** Recorded lesson objective, when available. */
+  objective?: string | null;
+  /** Lesson description, when available (client-provided context). */
+  description?: string | null;
+  /** Parent module description, when available (client-provided context). */
+  moduleDescription?: string | null;
 }
 
 /**
@@ -662,36 +702,182 @@ export function moduleNameForTarget(
   return '';
 }
 
+/** Provenance tag written by ModuleTab/Copilot when a generated module is applied. */
+const SESSION_MODULE_TAG = 'AI Suggested';
+
+function isSessionGeneratedModule(module: any): boolean {
+  return module?.trainingTag?.name === SESSION_MODULE_TAG;
+}
+
+/** Lessons of a session module: flat `lessons` and/or `topics[].lessons`. */
+function collectModuleLessons(module: any): Array<any> {
+  const lessons: Array<any> = [];
+  const seen = new Set<string>();
+  const push = (lesson: any) => {
+    const id = String(lesson?.id ?? '');
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    lessons.push(lesson);
+  };
+  if (Array.isArray(module?.lessons)) module.lessons.forEach(push);
+  for (const topic of module?.topics ?? []) {
+    for (const lesson of topic?.lessons ?? []) push(lesson);
+  }
+  return lessons;
+}
+
 /**
- * Build Content Description target options exclusively from the training
- * structure returned by the backend. Returns an empty array when the
- * structure is missing or has no modules — never mock ids.
+ * Build Content Description target options from:
+ *  1. the persisted training structure returned by the backend (source 'tsp',
+ *     authoritative, always listed first), and
+ *  2. session-generated modules applied in this frontend demo (source 'demo').
+ *
+ * Session records are only included when they carry the AI-generated
+ * provenance tag, so the seeded mock modules are not presented as selectable
+ * curriculum targets. Duplicates are resolved by id: a persisted TSP id always
+ * wins over a session record. Demo targets are labelled "(demo)" and are never
+ * sent to the backend (their ids are not TSP records).
+ *
+ * Backwards compatible: calling with only `structure` returns exactly the
+ * persisted targets as before.
  */
 export function buildContentTargets(
-  structure: BackendTrainingStructure | null | undefined
+  structure: BackendTrainingStructure | null | undefined,
+  frontendModules?: Array<any> | null,
 ): ContentTargetOption[] {
   const options: ContentTargetOption[] = [];
+  const seenModuleIds = new Set<string>();
+  const seenLessonIds = new Set<string>();
+
+  // 1. Persisted TSP records.
   for (const module of structure?.modules ?? []) {
-    if (module?.id) {
+    const moduleId = module?.id ? String(module.id) : '';
+    if (moduleId) {
+      seenModuleIds.add(moduleId);
       options.push({
         kind: 'module',
-        id: String(module.id),
+        id: moduleId,
         title: module.name,
         label: `Module: ${module.name}`,
+        source: 'tsp',
+        moduleId,
+        moduleTitle: module.name,
+        moduleDescription: module.description ?? null,
       });
     }
     for (const lesson of module?.lessons ?? []) {
-      if (lesson?.id) {
-        options.push({
-          kind: 'lesson',
-          id: String(lesson.id),
-          title: lesson.name,
-          label: `Lesson: ${lesson.name}`,
-        });
-      }
+      const lessonId = lesson?.id ? String(lesson.id) : '';
+      if (!lessonId || seenLessonIds.has(lessonId)) continue;
+      seenLessonIds.add(lessonId);
+      options.push({
+        kind: 'lesson',
+        id: lessonId,
+        title: lesson.name,
+        label: `Lesson: ${lesson.name}`,
+        source: 'tsp',
+        moduleId: moduleId || undefined,
+        moduleTitle: module.name,
+        objective: lesson.objective ?? null,
+        description: (lesson as any).description ?? null,
+        moduleDescription: module.description ?? null,
+      });
     }
   }
+
+  // 2. Session-generated (frontend demo) records.
+  for (const module of frontendModules ?? []) {
+    if (!isSessionGeneratedModule(module)) continue;
+    const moduleId = String(module?.id ?? '');
+    if (!moduleId || seenModuleIds.has(moduleId)) continue;
+    const moduleName = String(module?.name || module?.title || '').trim();
+    if (!moduleName) continue;
+    seenModuleIds.add(moduleId);
+    options.push({
+      kind: 'module',
+      id: moduleId,
+      title: moduleName,
+      label: `Module: ${moduleName} (demo)`,
+      source: 'demo',
+      moduleId,
+      moduleTitle: moduleName,
+      description: module?.description ?? null,
+      moduleDescription: module?.description ?? null,
+    });
+    for (const lesson of collectModuleLessons(module)) {
+      const lessonId = String(lesson?.id ?? '');
+      const lessonTitle = String(lesson?.title || lesson?.name || '').trim();
+      if (!lessonId || !lessonTitle || seenLessonIds.has(lessonId)) continue;
+      seenLessonIds.add(lessonId);
+      options.push({
+        kind: 'lesson',
+        id: lessonId,
+        title: lessonTitle,
+        label: `Lesson: ${lessonTitle} (demo)`,
+        source: 'demo',
+        moduleId,
+        moduleTitle: moduleName,
+        objective: lesson?.objective ?? null,
+        description: lesson?.description ?? null,
+        moduleDescription: module?.description ?? null,
+      });
+    }
+  }
+
   return options;
+}
+
+export interface ContentApplyAssociation {
+  moduleName: string;
+  lessonName?: string;
+  lessonId?: string;
+  targetSource: 'tsp' | 'demo';
+}
+
+/**
+ * Resolve the frontend association for an applied content-description draft.
+ *
+ * Persisted targets resolve their module/parent module from the real
+ * /structure ids (never by title matching). Session demo targets fall back to
+ * the parent module title carried on the draft target, so the lesson keeps its
+ * parent relationship even though no TSP record exists.
+ */
+export function resolveContentApplyAssociation(
+  target: {
+    kind: string;
+    id: string;
+    title?: string;
+    module_title?: string;
+    source?: 'tsp' | 'demo';
+  } | null | undefined,
+  structure: BackendTrainingStructure | null | undefined,
+): ContentApplyAssociation {
+  const targetSource: 'tsp' | 'demo' = target?.source === 'demo' ? 'demo' : 'tsp';
+  const kind = String(target?.kind ?? '').toLowerCase();
+  const targetId = target?.id ? String(target.id) : '';
+
+  let moduleName = '';
+  if (targetId) {
+    moduleName = moduleNameForTarget(
+      {
+        kind: kind === 'lesson' ? 'lesson' : 'module',
+        id: targetId,
+      },
+      structure,
+    );
+  }
+  if (!moduleName && target?.module_title) {
+    moduleName = String(target.module_title);
+  }
+  if (!moduleName && targetSource === 'demo' && kind === 'module') {
+    moduleName = String(target?.title ?? '');
+  }
+
+  return {
+    moduleName,
+    lessonName: kind === 'lesson' ? String(target?.title ?? '') : undefined,
+    lessonId: kind === 'lesson' && targetId ? targetId : undefined,
+    targetSource,
+  };
 }
 
 // =====================================================================

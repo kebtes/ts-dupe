@@ -70,6 +70,17 @@ export function getCompanyId(): string {
 }
 
 /**
+ * Explicit offline/demo mode. Local mock drafts are ONLY used when the
+ * operator opts in with VITE_OFFLINE_DEMO_MODE=true|1|yes|on; otherwise a
+ * backend failure is surfaced as an error and never masked with fake content.
+ */
+export function isOfflineDemoMode(): boolean {
+  return ['1', 'true', 'yes', 'on'].includes(
+    envString('VITE_OFFLINE_DEMO_MODE').toLowerCase()
+  );
+}
+
+/**
  * Resolve the training ID sent to the backend:
  * 1. VITE_TRAINING_ID (configured live demo training) — takes precedence so
  *    generation always targets the backend record.
@@ -131,6 +142,8 @@ export interface TabDraftResponse<T = any> {
   updated_at?: number;
   /** Response origin: 'backend' = live AI service; 'offline-mock' = local demo fallback. */
   source?: TabDraftSource;
+  /** Resolved generation target for target-scoped drafts (content description). */
+  target?: GenerationTarget | null;
 }
 
 // In-memory cache for fallback when backend is offline
@@ -400,8 +413,102 @@ export function getMockDraft(
 }
 
 /**
+ * Build an explicitly-labelled LOCAL demo draft for a session-only
+ * content-description target (a module/lesson applied from the Module tab).
+ *
+ * Such targets exist only in frontend state and do not have TSP ids. The
+ * backend only resolves persisted records (unknown ids are rejected, and its
+ * synthetic-id fallbacks resolve positionally against TSP records — sending a
+ * frontend id would target the WRONG record). So this helper deliberately
+ * does NOT call the backend: it produces a deterministic local outline marked
+ * `source: 'offline-mock'`, model `offline-demo`, with an explicit warning.
+ * It is NOT live AI output and nothing is sent to or saved in TSP.
+ */
+export function buildDemoContentDescriptionDraft(
+  target: {
+    kind: 'module' | 'lesson';
+    id: string;
+    title?: string;
+    module_title?: string;
+    moduleTitle?: string;
+    objective?: string | null;
+  },
+  trainingId: string,
+): TabDraftResponse<ContentDescriptionDraftData> {
+  const title = String(target.title || 'Selected target').trim();
+  const parentModule = String(target.module_title || target.moduleTitle || '').trim();
+  const objective = String(target.objective || '').trim();
+  const scope =
+    target.kind === 'lesson'
+      ? `the lesson "${title}"${parentModule ? ` in module "${parentModule}"` : ''}`
+      : `the module "${title}"`;
+  const description =
+    `Demo content request for ${scope}. ` +
+    (objective
+      ? `It focuses on the recorded lesson objective: "${objective}". `
+      : '') +
+    'The described asset should introduce the topic, provide guided practice or a walkthrough, ' +
+    'and define the evidence of completion learners produce. ' +
+    'This outline was generated locally for a module or lesson that exists only in this ' +
+    'browser session: it is not live AI output and no TSP curriculum record was written.';
+
+  const raw = {
+    status: 'success',
+    tab: 'content-description',
+    training_id: trainingId,
+    model: OFFLINE_MOCK_MODEL,
+    request_id: `offline-demo-${target.kind}-${target.id}-${Date.now()}`,
+    warnings: [OFFLINE_MOCK_WARNING],
+    data: {
+      title: `${title} — demo content outline`,
+      description,
+    },
+  };
+
+  return normalizeTabDraft(
+    'content-description',
+    raw as unknown as BackendTabEnvelope,
+    {
+      source: 'offline-mock',
+      target: {
+        kind: target.kind,
+        id: target.id,
+        title,
+        module_title: parentModule || undefined,
+        source: 'demo',
+      },
+    }
+  ) as TabDraftResponse<ContentDescriptionDraftData>;
+}
+
+/**
+ * Serialize a frontend target into the backend TargetDTO contract.
+ *
+ * Persisted targets send only {kind, id} — the backend resolves them against
+ * TSP. Temporary (source 'demo') targets are marked `source: 'client'` and
+ * carry their bounded lesson/module context; the backend must never resolve
+ * their synthetic ids against persisted records.
+ */
+function serializeGenerationTarget(
+  target?: GenerationTarget
+): Record<string, unknown> | null {
+  if (!target) return null;
+  const payload: Record<string, unknown> = { kind: target.kind, id: target.id };
+  if (target.source === 'demo') {
+    payload.source = 'client';
+    if (target.title) payload.title = target.title;
+    if (target.objective) payload.objective = target.objective;
+    if (target.description) payload.description = target.description;
+    if (target.module_title) payload.module_title = target.module_title;
+    if (target.module_description) payload.module_description = target.module_description;
+  }
+  return payload;
+}
+
+/**
  * Generate AI suggestion for a tab via the live backend.
- * Offline demo fallback only when the backend is unreachable.
+ * Offline demo fallback only when the backend is unreachable AND explicit
+ * offline/demo mode is enabled.
  */
 export async function generateTabDraft<T = any>(
   tab: TabName,
@@ -418,8 +525,10 @@ export async function generateTabDraft<T = any>(
       signal: controller.signal,
       body: JSON.stringify({
         training_id: trainingId,
-        // Backend TargetDTO: { kind, id } (extra="forbid")
-        target: target ? { kind: target.kind, id: target.id } : null,
+        // Backend TargetDTO: { kind, id } for persisted records, plus
+        // { source:'client', title, objective, module_title, ... } for
+        // temporary client-provided targets (extra="forbid").
+        target: serializeGenerationTarget(target),
       }),
     });
 
@@ -454,9 +563,16 @@ export async function generateTabDraft<T = any>(
         'wait. The backend may still be processing — press Generate again in a moment.'
       );
     }
-    // Backend unreachable (connection refused / DNS): provide a clearly
-    // identified local demo draft instead of failing the demo workflow.
+    // Backend unreachable (connection refused / DNS): only an explicit
+    // offline/demo mode may substitute a clearly-labelled local draft.
+    // Otherwise the failure is surfaced — never masked with fake content.
     if (isBackendUnreachableError(err)) {
+      if (!isOfflineDemoMode()) {
+        throw new Error(
+          `The AI backend at ${getApiBase()} could not be reached. ` +
+          'Start the backend, or set VITE_OFFLINE_DEMO_MODE=true to use local demo drafts.'
+        );
+      }
       console.warn(`[API] ${getApiBase()} unavailable. Using OFFLINE DEMO draft for tab '${tab}'.`);
       await sleep(OFFLINE_MOCK_LATENCY_MS);
       const mock = normalizeTabDraft(tab, getMockDraft(tab, trainingId, target), {
@@ -500,43 +616,94 @@ export async function pollBackendDraftAfterTimeout<T = any>(
   return null;
 }
 
+/** Map the backend's target provenance ('client') onto the UI concept ('demo'). */
+function normalizeDraftTarget(raw: any): GenerationTarget | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const kind = typeof raw.kind === 'string' ? raw.kind : '';
+  const id = typeof raw.id === 'string' ? raw.id : '';
+  if (!kind || !id) return null;
+  return {
+    kind,
+    id,
+    title: typeof raw.title === 'string' ? raw.title : undefined,
+    objective: typeof raw.objective === 'string' ? raw.objective : null,
+    description: typeof raw.description === 'string' ? raw.description : null,
+    module_title: typeof raw.module_title === 'string' ? raw.module_title : undefined,
+    module_description:
+      typeof raw.module_description === 'string' ? raw.module_description : null,
+    source: raw.source === 'client' ? 'demo' : 'tsp',
+  };
+}
+
 /**
- * Retrieve the latest cached AI suggestion draft for a tab from the backend's
+ * Retrieve a cached AI suggestion draft for a tab from the backend's
  * in-memory cache; falls back to the local in-session cache when absent.
+ *
+ * Content-description drafts are target-scoped: pass the selected target so
+ * Lesson B never returns Lesson A's draft. Without a target the backend's
+ * historical "latest draft for this tab" behavior is preserved, and the
+ * response's own target (when present) is restored for correct association.
  */
 export async function getCachedDraft<T = any>(
   tab: TabName,
-  trainingId: string
+  trainingId: string,
+  target?: GenerationTarget | null
 ): Promise<TabDraftResponse<T> | null> {
+  const baseCacheKey = `${tab}-${trainingId}`;
+  const targetCacheKey = target
+    ? `${baseCacheKey}-${target.kind}:${target.id}`
+    : baseCacheKey;
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), DRAFT_TIMEOUT_MS);
 
-    const response = await fetch(
-      `${getApiBase()}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(trainingId)}`,
-      {
-        method: 'GET',
-        headers: defaultHeaders(),
-        signal: controller.signal,
-      }
-    );
+    let url = `${getApiBase()}/v1/training-tabs/${tab}/draft?training_id=${encodeURIComponent(trainingId)}`;
+    if (target) {
+      url +=
+        `&target_id=${encodeURIComponent(target.id)}` +
+        `&target_kind=${encodeURIComponent(target.kind)}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: defaultHeaders(),
+      signal: controller.signal,
+    });
 
     clearTimeout(timeoutId);
 
     if (response.status === 404) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return (
+        LOCAL_DRAFT_CACHE[targetCacheKey] ||
+        LOCAL_DRAFT_CACHE[baseCacheKey] ||
+        null
+      );
     }
 
     if (!response.ok) {
-      return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+      return (
+        LOCAL_DRAFT_CACHE[targetCacheKey] ||
+        LOCAL_DRAFT_CACHE[baseCacheKey] ||
+        null
+      );
     }
 
     const result = await response.json();
-    const normalized = normalizeTabDraft(tab, result, { source: 'backend' });
-    LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] = normalized as TabDraftResponse;
+    const responseTarget = normalizeDraftTarget((result as any)?.target);
+    const normalized = normalizeTabDraft(tab, result, {
+      source: 'backend',
+      target: responseTarget ?? (target ? { ...target } : null),
+    });
+    LOCAL_DRAFT_CACHE[targetCacheKey] = normalized as TabDraftResponse;
+    // Keep the historical per-tab slot pointing at the newest draft.
+    LOCAL_DRAFT_CACHE[baseCacheKey] = normalized as TabDraftResponse;
     return normalized as TabDraftResponse<T>;
   } catch (err) {
-    return LOCAL_DRAFT_CACHE[`${tab}-${trainingId}`] || null;
+    return (
+      LOCAL_DRAFT_CACHE[targetCacheKey] ||
+      LOCAL_DRAFT_CACHE[baseCacheKey] ||
+      null
+    );
   }
 }
 

@@ -5,7 +5,7 @@
 // identification. All responses are mocked fetch stubs — no network, no model
 // API calls.
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   generateTabDraft,
   getCachedDraft,
@@ -16,7 +16,9 @@ import {
   DRAFT_TIMEOUT_MS,
   OFFLINE_MOCK_MODEL,
   OFFLINE_MOCK_WARNING,
+  buildDemoContentDescriptionDraft,
   getApiBase,
+  setEnvReaderForTests,
 } from '../src/api/tabs';
 import type { BackendTabEnvelope } from '../src/api/adapters';
 
@@ -78,6 +80,52 @@ describe('generateTabDraft request mapping', () => {
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(body.target).toBeNull();
+  });
+
+  it('serializes temporary client targets with bounded context, persisted targets unchanged', async () => {
+    const contentEnvelope = {
+      status: 'success',
+      tab: 'content-description',
+      data: { description: 'Metrics content description for the selected lesson target.' },
+      model: 'gemma4:31b-cloud',
+      warnings: [],
+      uncovered_lessons: [],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(contentEnvelope), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Persisted: only identity.
+    await generateTabDraft('content-description', 'train-1', {
+      kind: 'lesson',
+      id: 'les-db-1',
+      source: 'tsp',
+      title: 'Should not be sent',
+    });
+    let body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.target).toEqual({ kind: 'lesson', id: 'les-db-1' });
+
+    // Temporary: explicit client source + bounded context.
+    await generateTabDraft('content-description', 'train-1', {
+      kind: 'lesson',
+      id: 'client-lesson-1',
+      source: 'demo',
+      title: 'Generated Lesson',
+      objective: 'Measure quality.',
+      module_title: 'Generated Module',
+      module_description: 'Evaluation module.',
+      description: 'Compare metrics.',
+    });
+    body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(body.target).toEqual({
+      kind: 'lesson',
+      id: 'client-lesson-1',
+      source: 'client',
+      title: 'Generated Lesson',
+      objective: 'Measure quality.',
+      module_title: 'Generated Module',
+      module_description: 'Evaluation module.',
+      description: 'Compare metrics.',
+    });
   });
 
   it('normalizes the backend module response into the frontend shape', async () => {
@@ -144,6 +192,28 @@ describe('timeout configuration', () => {
 // ---------------------------------------------------------------------------
 
 describe('offline fallback identification', () => {
+  beforeEach(() => {
+    setEnvReaderForTests((name) =>
+      name === 'VITE_OFFLINE_DEMO_MODE' ? 'true' : undefined
+    );
+  });
+  afterEach(() => {
+    setEnvReaderForTests(null);
+  });
+
+  it('surfaces an understandable error instead of demo content when offline mode is off', async () => {
+    setEnvReaderForTests(() => undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      })
+    );
+    await expect(generateTabDraft('module', 'train-1')).rejects.toThrow(
+      /could not be reached/
+    );
+  });
+
   it('marks unreachable-backend drafts unmistakably as offline mocks', async () => {
     vi.stubGlobal(
       'fetch',
@@ -298,6 +368,129 @@ describe('offline fallback identification', () => {
 // ---------------------------------------------------------------------------
 // Malformed HTTP-200 responses are rejected end-to-end
 // ---------------------------------------------------------------------------
+
+describe('buildDemoContentDescriptionDraft (session demo targets)', () => {
+  const target = {
+    kind: 'lesson' as const,
+    id: 'lesson-1-1',
+    title: 'Generated Lesson: Metrics',
+    module_title: 'Generated Module: Evaluation',
+    objective: 'Measure model quality.',
+  };
+
+  it('is unmistakably marked as a local demo draft, never live AI output', () => {
+    const draft = buildDemoContentDescriptionDraft(target, 'train-1');
+    expect(draft.source).toBe('offline-mock');
+    expect(draft.model).toBe(OFFLINE_MOCK_MODEL);
+    expect(draft.warnings).toContain(OFFLINE_MOCK_WARNING);
+    expect(draft.request_id).toContain('offline-demo');
+  });
+
+  it('carries the session target with its parent module and demo provenance', () => {
+    const draft = buildDemoContentDescriptionDraft(target, 'train-1');
+    expect(draft.data.target).toEqual({
+      kind: 'lesson',
+      id: 'lesson-1-1',
+      title: 'Generated Lesson: Metrics',
+      module_title: 'Generated Module: Evaluation',
+      source: 'demo',
+    });
+    expect(draft.data.contents[0].lesson_id).toBe('lesson-1-1');
+    expect(draft.data.contents[0].lesson_title).toBe('Generated Lesson: Metrics');
+  });
+
+  it('produces a usable, grounded description', () => {
+    const draft = buildDemoContentDescriptionDraft(target, 'train-1');
+    const description = draft.data.contents[0].content_description;
+    expect(description).toContain('Generated Lesson: Metrics');
+    expect(description).toContain('Generated Module: Evaluation');
+    expect(description).toContain('Measure model quality.');
+    expect(description).toContain('not live AI output');
+    expect(description.length).toBeGreaterThanOrEqual(10);
+    expect(description.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('works for a session demo module target too', () => {
+    const draft = buildDemoContentDescriptionDraft(
+      {
+        kind: 'module',
+        id: 'mod-1-1700000000000',
+        title: 'Generated Module: Evaluation',
+        objective: null,
+      },
+      'train-1'
+    );
+    expect(draft.data.target?.source).toBe('demo');
+    expect(draft.data.contents[0].content_description).toContain(
+      'Generated Module: Evaluation'
+    );
+    expect(draft.data.contents[0].lesson_id).toBe('mod-1-1700000000000');
+  });
+});
+
+describe('target-scoped cached drafts', () => {
+  const target = {
+    kind: 'lesson' as const,
+    id: 'client-lesson-1',
+    source: 'demo' as const,
+    title: 'Generated Lesson',
+    module_title: 'Generated Module',
+  };
+
+  function draftEnvelope() {
+    return {
+      status: 'success',
+      tab: 'content-description',
+      training_id: 'train-1',
+      company_id: 'co-1',
+      data: { description: 'Metrics content description for the lesson.' },
+      model: 'gemma4:31b-cloud',
+      warnings: [],
+      uncovered_lessons: [],
+      target: {
+        kind: 'lesson',
+        id: 'client-lesson-1',
+        title: 'Generated Lesson',
+        module_title: 'Generated Module',
+        source: 'client',
+      },
+      created_at: 1,
+      updated_at: 2,
+    };
+  }
+
+  it('requests the target-scoped draft and restores its provenance', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(draftEnvelope()), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const draft = await getCachedDraft('content-description', 'train-1', target);
+
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain('target_id=client-lesson-1');
+    expect(url).toContain('target_kind=lesson');
+    expect(draft?.data.target?.source).toBe('demo');
+    expect(draft?.data.target?.module_title).toBe('Generated Module');
+    expect(draft?.data.contents[0].content_description).toBe(
+      'Metrics content description for the lesson.'
+    );
+  });
+
+  it('keeps the legacy latest-draft request when no target is given', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(draftEnvelope()), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const draft = await getCachedDraft('content-description', 'train-1');
+
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).not.toContain('target_id');
+    // The response's own target is still restored for correct association.
+    expect(draft?.data.target?.source).toBe('demo');
+  });
+});
 
 describe('malformed HTTP-200 handling', () => {
   it('rejects a 200 response with unusable data instead of returning a draft or mock', async () => {

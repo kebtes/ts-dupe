@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { TrainingData } from '../../types';
-import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
-import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData, getActiveTrainingId, ContentTargetOption } from '../../api/tabs';
-import { buildContentTargets, moduleNameForTarget, normalizeTabDraft } from '../../api/adapters';
+import { Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
+import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData, getActiveTrainingId, ContentTargetOption, buildDemoContentDescriptionDraft, isOfflineDemoMode } from '../../api/tabs';
+import { buildContentTargets, normalizeTabDraft, resolveContentApplyAssociation } from '../../api/adapters';
 import {
   resolveContentSelection,
   canStartContentGeneration,
   buildContentGenerationRequest,
+  isPersistedContentTarget,
 } from '../../api/contentSelection';
 import { useTrainingStructure } from '../../api/useTrainingStructure';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
@@ -23,20 +24,14 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
   const [contents, setContents] = useState(data.contents || []);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedModule, setSelectedModule] = useState('ALL');
-  const [isAddOpen, setIsAddOpen] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [newType, setNewType] = useState('PDF');
-  const [newModule, setNewModule] = useState(
-    data.modules?.[0]?.name || 'Phase One Final Research'
-  );
 
   /**
-   * Backend contract: content-description generation requires a target
-   * (kind: 'module' | 'lesson', id of a real record). The options come
-   * exclusively from the backend's read-only training structure endpoint —
-   * never from mock data. On failure there is NO mock fallback: the error is
-   * shown and generation is blocked until real records load.
+   * Targets come from two sources:
+   *  - persisted TSP records from the read-only /structure endpoint
+   *    (source 'tsp'), resolved by the backend against TSP; and
+   *  - modules/lessons generated and applied in this frontend session
+   *    (source 'demo', labelled "(demo)"), sent to the SAME backend pipeline
+   *    as explicit client-provided context (never resolved against TSP).
    */
   const trainingId = getActiveTrainingId(data.training?.id);
 
@@ -48,8 +43,8 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
   } = useTrainingStructure(trainingId);
 
   const targetOptions: ContentTargetOption[] = useMemo(
-    () => buildContentTargets(structure),
-    [structure]
+    () => buildContentTargets(structure, data.modules),
+    [structure, data.modules]
   );
 
   const [selectedTargetId, setSelectedTargetId] = useState<string>('');
@@ -68,6 +63,8 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
 
   const selectedTarget: ContentTargetOption | null =
     targetOptions.find((t) => t.id === selectedTargetId) ?? null;
+
+  const persistedSelected = isPersistedContentTarget(selectedTarget);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<ContentDescriptionDraftData> | null>(null);
@@ -97,24 +94,56 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
     }
   }, [suggestedDraft]);
 
-  // Check cached draft on mount
+  // Load the cached draft for the selected target. Content-description
+  // drafts are target-scoped on the backend, so Lesson B never shows
+  // Lesson A's draft. With no selection, the historical latest-draft
+  // behavior is preserved.
   useEffect(() => {
-    getCachedDraft<ContentDescriptionDraftData>('content-description', trainingId).then((draft) => {
-      if (draft && draft.data?.contents?.length) {
-        // Issue 2: the backend cache keeps returning the same draft after it
-        // was applied — re-applying it creates a duplicate content record.
-        // Skip drafts whose backend request_id was already applied this
-        // session. A fresh regeneration gets a new request_id and can be
-        // applied again normally.
+    let cancelled = false;
+    const targetArg = selectedTarget
+      ? {
+          kind: selectedTarget.kind,
+          id: selectedTarget.id,
+          title: selectedTarget.title,
+          module_title: selectedTarget.moduleTitle,
+          objective: selectedTarget.objective ?? undefined,
+          description: selectedTarget.description ?? undefined,
+          module_description: selectedTarget.moduleDescription ?? undefined,
+          source:
+            selectedTarget.source === 'demo'
+              ? ('demo' as const)
+              : ('tsp' as const),
+        }
+      : null;
+    getCachedDraft<ContentDescriptionDraftData>(
+      'content-description',
+      trainingId,
+      targetArg
+    )
+      .then((draft) => {
+        if (cancelled) return;
+        if (!draft || !draft.data?.contents?.length) {
+          // A newly selected target with no cached draft must not keep
+          // showing a different target's draft.
+          if (selectedTargetId) setAiDraft(null);
+          return;
+        }
+        // Skip drafts whose backend request_id was already applied, so a
+        // remount cannot re-apply the same draft into a duplicate record.
         const requestId = draft.request_id || '';
         const applied = (data.appliedContentRequestIds ?? []) as string[];
         if (requestId && applied.includes(requestId)) {
           return;
         }
         setAiDraft(draft);
-      }
-    });
-  }, [trainingId]); // eslint-disable-line react-hooks/exhaustive-deps
+      })
+      .catch(() => {
+        // Draft retrieval is best-effort; generation still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [trainingId, selectedTargetId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const modulesList = Array.from(
     new Set((data.contents || []).map((c) => c.moduleName).filter(Boolean))
@@ -146,18 +175,36 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
       return;
     }
 
-    // Backend contract: a real target record (kind + id) is required, and it
-    // must come from the loaded training structure — never from mock data.
+    // Temporary (session) targets use the SAME backend generation pipeline,
+    // sending their bounded lesson/module context with source='client'. The
+    // backend never resolves their synthetic ids against TSP. Only an
+    // explicit offline/demo mode uses the local generator.
     setIsGenerating(true);
     setErrorMessage(null);
     try {
-      const request = buildContentGenerationRequest(trainingId, selectedTarget!);
-      const response = await generateTabDraft<ContentDescriptionDraftData>(
-        request.tab,
-        request.trainingId,
-        request.target
-      );
-      setAiDraft(response);
+      const target = selectedTarget!;
+      if (!isPersistedContentTarget(target) && isOfflineDemoMode()) {
+        setAiDraft(
+          buildDemoContentDescriptionDraft(
+            {
+              kind: target.kind,
+              id: target.id,
+              title: target.title,
+              module_title: target.moduleTitle,
+              objective: target.objective ?? null,
+            },
+            trainingId
+          )
+        );
+      } else {
+        const request = buildContentGenerationRequest(trainingId, target);
+        const response = await generateTabDraft<ContentDescriptionDraftData>(
+          request.tab,
+          request.trainingId,
+          request.target
+        );
+        setAiDraft(response);
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'AI model unavailable. Try again in a moment.');
     } finally {
@@ -178,16 +225,23 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
         setAiDraft(null);
         return;
       }
-      // Issue 1: associate the content with the module the user actually
-      // selected (resolved by ID from the backend training structure —
-      // never the first module, never text matching). The generation-time
-      // target is carried on the draft itself, so a later selection change
-      // cannot corrupt the association. Unresolvable targets stay
-      // unassociated ('') rather than being silently mislabeled.
+      // Associate the applied content with the target that produced it. The
+      // generation-time target is carried on the draft itself, so a later
+      // selection change cannot corrupt the association:
+      //  - persisted targets resolve the module/parent module by real IDs;
+      //  - session demo targets fall back to the parent module title they
+      //    carried, and keep their lesson id/name in frontend state.
       const target = aiDraft.data.target as
-        | { kind: 'module' | 'lesson'; id: string }
-        | null | undefined;
-      const resolvedModuleName = moduleNameForTarget(target, structure);
+        | {
+            kind: 'module' | 'lesson';
+            id: string;
+            title?: string;
+            module_title?: string;
+            source?: 'tsp' | 'demo';
+          }
+        | null
+        | undefined;
+      const association = resolveContentApplyAssociation(target, structure);
       const newItems = aiDraft.data.contents.map((c, i) => {
         const takeaways =
           c.key_takeaways && c.key_takeaways.length > 0
@@ -200,7 +254,10 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
           contentLevel: 'LESSON',
           contentFileType: 'PDF',
           contentStatus: 'ACCEPTED',
-          moduleName: resolvedModuleName,
+          moduleName: association.moduleName,
+          lessonId: association.lessonId,
+          lessonName: association.lessonName,
+          targetSource: association.targetSource,
           contentDeveloper: {
             email: 'gemma-ai@gheero.et',
             role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
@@ -222,32 +279,6 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
       setAiDraft(null);
       onDismissDraft?.();
     }
-  };
-
-  const handleAddContent = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim()) return;
-    const newContent = {
-      id: `content-${Date.now()}`,
-      name: newName,
-      description: newDesc,
-      contentLevel: 'MODULE',
-      contentFileType: newType,
-      contentStatus: 'PENDING',
-      moduleName: newModule,
-      contentDeveloper: {
-        email: 'developer@gheero.et',
-        role: { name: 'ROLE_CONTENT_DEVELOPER', colorCode: '#Content Developer' },
-      },
-    };
-    const updated = [newContent as any, ...contents];
-    setContents(updated);
-    if (onUpdateData) {
-      onUpdateData({ ...data, contents: updated });
-    }
-    setNewName('');
-    setNewDesc('');
-    setIsAddOpen(false);
   };
 
   return (
@@ -294,9 +325,9 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
             <select
               value={selectedTargetId}
               onChange={(e) => setSelectedTargetId(e.target.value)}
-              disabled={isGenerating || structureLoading || !!structureError}
+              disabled={isGenerating}
               className="border border-gray-300 rounded-md text-xs px-2.5 py-2 bg-white text-gray-700 max-w-[220px] disabled:opacity-50"
-              title="Content target for AI generation (real TSP records)"
+              title="Content target: persisted TSP records, or session demo records (labelled demo)"
               aria-label="Content generation target"
             >
               <option value="" disabled>
@@ -312,7 +343,11 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
           {/* AI Generator Button */}
           <button
             onClick={handleGenerate}
-            disabled={isGenerating || structureLoading || !!structureError || !selectedTarget}
+            disabled={
+              isGenerating ||
+              !selectedTarget ||
+              (persistedSelected && (structureLoading || !!structureError))
+            }
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm disabled:opacity-50"
           >
             {isGenerating ? (
@@ -320,17 +355,13 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
             ) : (
               <Sparkles className="w-4 h-4 text-cyan-200" />
             )}
-            <span>{isGenerating ? 'Generating... (may take up to 3 min)' : 'Suggest Content with AI'}</span>
+            <span>
+              {isGenerating
+                ? 'Generating... (may take up to 3 min)'
+                : 'Suggest Content with AI'}
+            </span>
           </button>
 
-          {/* Manual Add Button */}
-          <button
-            onClick={() => setIsAddOpen(true)}
-            className="bg-brand text-white px-4 py-2.5 rounded-md text-sm font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors shadow-sm"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Content</span>
-          </button>
         </div>
       </div>
 
@@ -354,8 +385,23 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
           onRegenerate={handleGenerate}
         >
           <div className="space-y-4">
+            {aiDraft.data.target?.source === 'demo' && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                <strong>Temporary target:</strong> this module or lesson exists
+                only in this browser session (applied from the Module tab) and
+                is <strong>not</strong> a persisted TSP record.{' '}
+                {aiDraft.source === 'offline-mock'
+                  ? 'The description below was generated by the offline demo generator (explicit offline mode).'
+                  : 'The description below was generated by the real AI backend.'}{' '}
+                Nothing was saved to TSP.
+              </div>
+            )}
             <p className="text-xs text-gray-500">
-              The AI generated {aiDraft.data.contents.length} content description(s) for the selected target:
+              {aiDraft.source === 'offline-mock'
+                ? `Offline demo drafted ${aiDraft.data.contents.length} description(s) for the selected target:`
+                : `The AI generated ${aiDraft.data.contents.length} content description(s) for the selected ${
+                    aiDraft.data.target?.source === 'demo' ? 'temporary ' : ''
+                  }target:`}
             </p>
             <div className="space-y-3">
               {aiDraft.data.contents.map((c, idx) => (
@@ -452,6 +498,14 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-brand">
                     {item.contentLevel}
                   </span>
+                  {item.targetSource === 'demo' && (
+                    <span
+                      className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200"
+                      title="Generated for a temporary session target — not a persisted TSP record"
+                    >
+                      Temporary
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -497,96 +551,6 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData, sugg
           ))
         )}
       </div>
-
-      {/* Add Content Modal */}
-      {isAddOpen && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4">
-            <div className="flex justify-between items-center border-b pb-3">
-              <h3 className="text-lg font-bold text-gray-900">Add Training Content</h3>
-              <button
-                onClick={() => setIsAddOpen(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl font-bold"
-              >
-                &times;
-              </button>
-            </div>
-            <form onSubmit={handleAddContent} className="space-y-4">
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Title</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Fine-Tuning LLMs with LoRA"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    File Type
-                  </label>
-                  <select
-                    value={newType}
-                    onChange={(e) => setNewType(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
-                  >
-                    <option value="PDF">PDF Document</option>
-                    <option value="LINK">External Link</option>
-                    <option value="VIDEO">Video</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">
-                    Module
-                  </label>
-                  <select
-                    value={newModule}
-                    onChange={(e) => setNewModule(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
-                  >
-                    {data.modules?.map((m) => (
-                      <option key={m.id} value={m.name}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Description
-                </label>
-                <textarea
-                  rows={4}
-                  required
-                  placeholder="Describe the content, learning goals, or instructions..."
-                  value={newDesc}
-                  onChange={(e) => setNewDesc(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand border-[#CED4DA]"
-                />
-              </div>
-              <div className="flex justify-end gap-3 pt-3 border-t">
-                <button
-                  type="button"
-                  onClick={() => setIsAddOpen(false)}
-                  className="px-4 py-2 border rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-brand text-white rounded-md text-sm font-semibold hover:bg-blue-700"
-                >
-                  Upload Content
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

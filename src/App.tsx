@@ -115,7 +115,6 @@ export function App() {
           <ModuleTab
             data={data}
             onUpdateData={setData}
-            onOpenCopilot={() => setIsCopilotOpen(true)}
             suggestedDraft={suggestedDrafts['module']}
             onDismissDraft={() => setSuggestedDrafts((prev) => ({ ...prev, module: null }))}
           />
