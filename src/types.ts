@@ -99,6 +99,12 @@ export interface TrainingData {
       role?: { name: string; colorCode: string };
     };
   }>;
+  /**
+   * Issue 2: backend request_ids of AI content drafts already applied this
+   * session — prevents the cached draft from being re-applied into
+   * duplicate content records after a tab remount or double click.
+   */
+  appliedContentRequestIds?: string[];
 }
 
 export type TabType = 

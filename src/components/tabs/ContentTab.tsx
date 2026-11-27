@@ -2,7 +2,12 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { TrainingData } from '../../types';
 import { Plus, Search, FileText, ExternalLink, CheckCircle, Clock, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
 import { generateTabDraft, getCachedDraft, TabDraftResponse, ContentDescriptionDraftData, getActiveTrainingId, ContentTargetOption } from '../../api/tabs';
-import { buildContentTargets } from '../../api/adapters';
+import { buildContentTargets, moduleNameForTarget } from '../../api/adapters';
+import {
+  resolveContentSelection,
+  canStartContentGeneration,
+  buildContentGenerationRequest,
+} from '../../api/contentSelection';
 import { useTrainingStructure } from '../../api/useTrainingStructure';
 import { AiDraftCard, AiErrorBanner } from '../ui/AiDraftCard';
 
@@ -46,16 +51,17 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
 
   const [selectedTargetId, setSelectedTargetId] = useState<string>('');
 
-  // Keep the selection on a valid target as the structure loads/changes.
+  // Explicit-selection workflow: the trainer picks a target — the component
+  // never auto-selects one. This effect only CLEARS an invalid selection:
+  // when the structure loads fresh, changes, or the selected target
+  // disappeared (e.g. after switching training contexts), the stale id is
+  // dropped so generation can never use a target the backend doesn't know.
   useEffect(() => {
-    if (targetOptions.length === 0) {
-      setSelectedTargetId('');
-      return;
+    const resolved = resolveContentSelection(targetOptions, selectedTargetId);
+    if (resolved !== selectedTargetId) {
+      setSelectedTargetId(resolved);
     }
-    if (!targetOptions.some((t) => t.id === selectedTargetId)) {
-      setSelectedTargetId(targetOptions[0].id);
-    }
-  }, [targetOptions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [targetOptions, selectedTargetId]);
 
   const selectedTarget: ContentTargetOption | null =
     targetOptions.find((t) => t.id === selectedTargetId) ?? null;
@@ -64,14 +70,32 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   const [aiDraft, setAiDraft] = useState<TabDraftResponse<ContentDescriptionDraftData> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // A draft or error generated for a previous training must not carry over
+  // into a new training context. Declared BEFORE the cached-draft effect so
+  // a freshly loaded cached draft for the new training still displays.
+  useEffect(() => {
+    setAiDraft(null);
+    setErrorMessage(null);
+  }, [trainingId]);
+
   // Check cached draft on mount
   useEffect(() => {
     getCachedDraft<ContentDescriptionDraftData>('content-description', trainingId).then((draft) => {
       if (draft && draft.data?.contents?.length) {
+        // Issue 2: the backend cache keeps returning the same draft after it
+        // was applied — re-applying it creates a duplicate content record.
+        // Skip drafts whose backend request_id was already applied this
+        // session. A fresh regeneration gets a new request_id and can be
+        // applied again normally.
+        const requestId = draft.request_id || '';
+        const applied = (data.appliedContentRequestIds ?? []) as string[];
+        if (requestId && applied.includes(requestId)) {
+          return;
+        }
         setAiDraft(draft);
       }
     });
-  }, [trainingId]);
+  }, [trainingId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const modulesList = Array.from(
     new Set((data.contents || []).map((c) => c.moduleName).filter(Boolean))
@@ -90,26 +114,29 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
   });
 
   const handleGenerate = async () => {
-    if (isGenerating) return; // Prevent duplicate submissions
-
-    // Backend contract: a real target record (kind + id) is required, and it
-    // must come from the loaded training structure — never from mock data.
-    if (structureLoading || structureError || !selectedTarget) {
-      setErrorMessage(
-        structureError
-          ? `Cannot generate yet: ${structureError}`
-          : 'Loading the training structure — select a module or lesson target once it loads.'
-      );
+    // One click = at most one request: while a generation is in flight the
+    // gate below blocks any re-entry, and the Generate button is disabled.
+    const gate = canStartContentGeneration({
+      isGenerating,
+      structureLoading,
+      structureError,
+      selectedTarget,
+    });
+    if (!gate.allowed) {
+      setErrorMessage(gate.reason ?? 'Generation is not available right now.');
       return;
     }
 
+    // Backend contract: a real target record (kind + id) is required, and it
+    // must come from the loaded training structure — never from mock data.
     setIsGenerating(true);
     setErrorMessage(null);
     try {
+      const request = buildContentGenerationRequest(trainingId, selectedTarget!);
       const response = await generateTabDraft<ContentDescriptionDraftData>(
-        'content-description',
-        trainingId,
-        { kind: selectedTarget.kind, id: selectedTarget.id }
+        request.tab,
+        request.trainingId,
+        request.target
       );
       setAiDraft(response);
     } catch (err: any) {
@@ -121,6 +148,27 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
 
   const handleApplyDraft = () => {
     if (aiDraft?.data?.contents) {
+      // Issue 2: request-level idempotency — the same backend draft (same
+      // request_id) can only create content once, guarding against double
+      // clicks and the remount-time cached-draft re-apply. A regenerated
+      // draft carries a new request_id, so intentional separate generations
+      // still create separate records.
+      const requestId = aiDraft.request_id || '';
+      const applied = (data.appliedContentRequestIds ?? []) as string[];
+      if (requestId && applied.includes(requestId)) {
+        setAiDraft(null);
+        return;
+      }
+      // Issue 1: associate the content with the module the user actually
+      // selected (resolved by ID from the backend training structure —
+      // never the first module, never text matching). The generation-time
+      // target is carried on the draft itself, so a later selection change
+      // cannot corrupt the association. Unresolvable targets stay
+      // unassociated ('') rather than being silently mislabeled.
+      const target = aiDraft.data.target as
+        | { kind: 'module' | 'lesson'; id: string }
+        | null | undefined;
+      const resolvedModuleName = moduleNameForTarget(target, structure);
       const newItems = aiDraft.data.contents.map((c, i) => {
         const takeaways =
           c.key_takeaways && c.key_takeaways.length > 0
@@ -133,7 +181,7 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
           contentLevel: 'LESSON',
           contentFileType: 'PDF',
           contentStatus: 'ACCEPTED',
-          moduleName: data.modules?.[0]?.name || 'Module 1: Foundations',
+          moduleName: resolvedModuleName,
           contentDeveloper: {
             email: 'gemma-ai@gheero.et',
             role: { name: 'AI_CONTENT_CURATOR', colorCode: '#6366f1' },
@@ -144,7 +192,13 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
       const updated = [...newItems as any, ...contents];
       setContents(updated);
       if (onUpdateData) {
-        onUpdateData({ ...data, contents: updated });
+        onUpdateData({
+          ...data,
+          contents: updated,
+          appliedContentRequestIds: requestId
+            ? [...applied, requestId]
+            : applied,
+        });
       }
       setAiDraft(null);
     }
@@ -208,14 +262,26 @@ export const ContentTab: React.FC<ContentTabProps> = ({ data, onUpdateData }) =>
               No modules or lessons found for this training.
             </span>
           )}
+          {!structureLoading &&
+            !structureError &&
+            targetOptions.length > 0 &&
+            !selectedTarget && (
+              <span className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-2 rounded-md">
+                Select a module or lesson below to generate content for.
+              </span>
+            )}
           {targetOptions.length > 0 && (
             <select
-              value={selectedTargetId || targetOptions[0]?.id || ''}
+              value={selectedTargetId}
               onChange={(e) => setSelectedTargetId(e.target.value)}
               disabled={isGenerating || structureLoading || !!structureError}
               className="border border-gray-300 rounded-md text-xs px-2.5 py-2 bg-white text-gray-700 max-w-[220px] disabled:opacity-50"
               title="Content target for AI generation (real TSP records)"
+              aria-label="Content generation target"
             >
+              <option value="" disabled>
+                Select a module or lesson…
+              </option>
               {targetOptions.map((t) => (
                 <option key={`${t.kind}-${t.id}`} value={t.id}>
                   {t.label}

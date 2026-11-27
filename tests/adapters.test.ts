@@ -12,6 +12,7 @@ import {
   normalizeAssessmentDraft,
   normalizeContentDescriptionDraft,
   normalizeTabDraft,
+  moduleNameForTarget,
   type BackendTabEnvelope,
 } from '../src/api/adapters';
 
@@ -491,5 +492,57 @@ describe('malformed HTTP-200 responses (minimum usability)', () => {
       expect(e.reason).toContain('no valid questions');
       expect(e.message).toBe('Backend returned an unusable assessment draft.');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue 1: module association by ID (never first-module defaults)
+// ---------------------------------------------------------------------------
+
+describe('moduleNameForTarget', () => {
+  const structure = {
+    modules: [
+      { id: 'mod-w0', name: 'Week 0 - Orientation', lessons: [
+        { id: 'les-0', name: 'Orientation' },
+      ]},
+      { id: 'mod-w3', name: 'Week 3 Applied Large Language Models', lessons: [
+        { id: 'les-31', name: 'Understanding LLMs' },
+        { id: 'les-32', name: 'Fine-Tuning' },
+      ]},
+      { id: 'mod-w4', name: 'Week 4 Reinforcement Learning-Based Amharic Tokenization', lessons: [
+        { id: 'les-41', name: 'Tokenizer Design' },
+      ]},
+    ],
+  } as any;
+
+  it('associates a module target with its own module', () => {
+    expect(moduleNameForTarget(
+      { kind: 'module', id: 'mod-w3' }, structure,
+    )).toBe('Week 3 Applied Large Language Models');
+  });
+
+  it('associates a lesson target with its PARENT module', () => {
+    expect(moduleNameForTarget(
+      { kind: 'lesson', id: 'les-41' }, structure,
+    )).toBe('Week 4 Reinforcement Learning-Based Amharic Tokenization');
+    expect(moduleNameForTarget(
+      { kind: 'lesson', id: 'les-0' }, structure,
+    )).toBe('Week 0 - Orientation');
+  });
+
+  it('never defaults to the first module', () => {
+    // Unknown lesson id resolves to '' — never "Week 0 - Orientation".
+    expect(moduleNameForTarget(
+      { kind: 'lesson', id: 'les-unknown' }, structure,
+    )).toBe('');
+    expect(moduleNameForTarget(
+      { kind: 'module', id: 'mod-unknown' }, structure,
+    )).toBe('');
+  });
+
+  it('handles missing structure or targets safely', () => {
+    expect(moduleNameForTarget(null, structure)).toBe('');
+    expect(moduleNameForTarget({ kind: 'module', id: 'mod-w3' }, null)).toBe('');
+    expect(moduleNameForTarget({ kind: 'module', id: '' }, structure)).toBe('');
   });
 });

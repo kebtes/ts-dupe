@@ -636,6 +636,33 @@ export interface ContentTargetOption {
 }
 
 /**
+ * Resolve the module NAME for a content-description target using ONLY the
+ * backend structure IDs — the module the user actually selected. Never
+ * defaults to the first module and never matches on titles or text: an
+ * unresolvable target yields '' (the UI hides the label) instead of a wrong
+ * association.
+ */
+export function moduleNameForTarget(
+  target: { kind: 'module' | 'lesson'; id: string } | null | undefined,
+  structure: BackendTrainingStructure | null | undefined,
+): string {
+  const targetId = target?.id ? String(target.id) : '';
+  if (!targetId || !structure?.modules?.length) return '';
+  if (target.kind === 'module') {
+    const mod = structure.modules.find(
+      (m) => String(m.id) === targetId,
+    );
+    return mod?.name ?? '';
+  }
+  for (const mod of structure.modules) {
+    if ((mod.lessons ?? []).some((l) => String(l.id) === targetId)) {
+      return mod.name ?? '';
+    }
+  }
+  return '';
+}
+
+/**
  * Build Content Description target options exclusively from the training
  * structure returned by the backend. Returns an empty array when the
  * structure is missing or has no modules — never mock ids.
